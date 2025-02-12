@@ -1,709 +1,506 @@
-const { Telegraf, Markup } = require('telegraf');
-const axios = require('axios');
-const sqlite3 = require('sqlite3').verbose();
+const { Telegraf } = require('telegraf');
+const config = require('./config');
+const db = require('./database');
+const api = require('./api');
+const keyboards = require('./keyboards');
+const monitoring = require('./monitoring');
+//const { message } = require('telegraf/filters');
 
-require('dotenv').config();
+const bot = new Telegraf(config.TELEGRAM_TOKEN);
 
-const bot = new Telegraf(process.env.TELEGRAM_TOKEN);
+// async function checkNewOrders(userId, sessionId) {
+//     try {
+//         const currentDate = new Date().toLocaleDateString('ru-RU');
+//         const response = await api.getRoutes(sessionId, currentDate);
+        
+//         if (!response?.TL_Mobile_EnumRoutesResponse?.Routes) return;
 
-const intervalUpdates = process.env.INTERVAL_UPDATES;
+//         const currentOrders = new Set(
+//             response.TL_Mobile_EnumRoutesResponse.Routes
+//                 .flatMap(route => route.Orders?.map(order => order.ExternalId) || [])
+//         );
 
-let activeMonitoring = new Map();
-let lastKnownOrders = new Map();
+//         // Если заказов нет и это первая проверка
+//         if (currentOrders.size === 0 && !monitoring.getLastKnownOrders(userId).size) {
+//             await bot.telegram.sendMessage(userId, `📭 На ${currentDate} заказов нет`);
+//             return;
+//         }
 
-const db = new sqlite3.Database('sessions.db');
+//         const previousOrders = monitoring.getLastKnownOrders(userId);
+//         const newOrders = [...currentOrders].filter(order => !previousOrders.has(order));
 
-db.serialize(() => {
-    db.run(`CREATE TABLE IF NOT EXISTS sessions (
-        user_id INTEGER PRIMARY KEY,
-        client_code TEXT,
-        login TEXT,
-        password TEXT,
-        session_id TEXT,
-        driver_name TEXT,
-        step TEXT
-    )`);
-});
+//         if (newOrders.length) {
+//             await bot.telegram.sendMessage(
+//                 userId, 
+//                 `🆕 Новые заказы:\n${newOrders.map(order => `📦 ${order}`).join('\n')}`
+//             );
+//         }
 
-const dbMethods = {
-    saveSession: (userId, sessionData) => {
-        return new Promise((resolve, reject) => {
-            console.log('Saving session data:', sessionData);
-            const query = `INSERT OR REPLACE INTO sessions 
-                (user_id, client_code, login, password, session_id, driver_name, step) 
-                VALUES (?, ?, ?, ?, ?, ?, ?)`;
-            const params = [
-                userId,
-                sessionData.client_code,
-                sessionData.login,
-                sessionData.password,
-                sessionData.session_id,
-                sessionData.driver_name,
-                sessionData.step
-            ];
-
-            // Add validation checks
-            if (!userId) {
-                reject(new Error('userId is required'));
-                return;
-            }
-
-            // Log full state for debugging
-            console.log('Current state:', {
-                query,
-                params,
-                sessionData: JSON.stringify(sessionData)
-            });
-
-            db.run(query, params, function(err) {
-                if (err) {
-                    console.error('Database error:', err);
-                    reject(err);
-                    return;
-                }
-                console.log('Session saved successfully. Row ID:', this.lastID);
-
-                // Verify saved data
-                db.get('SELECT * FROM sessions WHERE user_id = ?', [userId], (verifyErr, row) => {
-                    if (verifyErr) {
-                        console.error('Verification error:', verifyErr);
-                    } else {
-                        console.log('Verified saved data:', row);
-                    }
-                    resolve();
-                });
-            });
-        });
-    },
-
-    getSession: (userId) => {
-        return new Promise((resolve, reject) => {
-            if (!userId) {
-                reject(new Error('userId is required'));
-                return;
-            }
-
-            console.log('Getting session for userId:', userId);
-
-            db.get('SELECT * FROM sessions WHERE user_id = ?', [userId], (err, row) => {
-                if (err) {
-                    console.error('Error getting session:', err);
-                    reject(err);
-                    return;
-                }
-
-                if (!row) {
-                    console.log('No session found for userId:', userId);
-                } else {
-                    console.log('Retrieved session state:', {
-                        userId,
-                        step: row.step,
-                        hasClientCode: !!row.client_code,
-                        hasLogin: !!row.login
-                    });
-                }
-
-                resolve(row);
-            });
-        });
-    },
-
-    deleteSession: (userId) => {
-        return new Promise((resolve, reject) => {
-            db.run('DELETE FROM sessions WHERE user_id = ?', [userId], (err) => {
-                if (err) {
-                    console.error('Error deleting session:', err);
-                    reject(err);
-                    return;
-                }
-                console.log('Session deleted for userId:', userId);
-                resolve();
-            });
-        });
-    }
-};
-
-function extractOrders(routes) {
-    const orders = new Set();
-    routes.forEach(route => {
-        route.Orders.forEach(order => {
-            orders.add(order.ExternalId);
-        });
-    });
-    return orders;
-}
+//         monitoring.updateLastKnownOrders(userId, currentOrders);
+//     } catch (error) {
+//         console.error('Error checking orders:', error);
+//     }
+// }
 
 async function checkNewOrders(userId, sessionId) {
     try {
-        const currentDate = new Date();
-        const formattedDate = `${String(currentDate.getDate()).padStart(2, '0')}.${String(currentDate.getMonth() + 1).padStart(2, '0')}.${currentDate.getFullYear()}`;
-
-        const response = await getRoutes(sessionId, formattedDate);
+        const currentDate = new Date().toLocaleDateString('ru-RU');
+        const response = await api.getRoutes(sessionId, currentDate);
         
-        if (!response.TL_Mobile_EnumRoutesResponse || !response.TL_Mobile_EnumRoutesResponse.Routes) {
+        if (!response?.TL_Mobile_EnumRoutesResponse?.Routes) return;
+
+        const routes = response.TL_Mobile_EnumRoutesResponse.Routes;
+        const currentOrders = new Set(
+            routes.flatMap(route => route.Orders?.map(order => order.ExternalId) || [])
+        );
+
+        // Если заказов нет и это первая проверка
+        if (currentOrders.size === 0 && !monitoring.getLastKnownOrders(userId).size) {
+            await bot.telegram.sendMessage(userId, `📭 На ${currentDate} заказов нет`);
             return;
         }
 
-        const currentOrders = extractOrders(response.TL_Mobile_EnumRoutesResponse.Routes);
-        const previousOrders = lastKnownOrders.get(userId) || new Set();
-
-        // Находим новые заказы
+        const previousOrders = monitoring.getLastKnownOrders(userId);
         const newOrders = [...currentOrders].filter(order => !previousOrders.has(order));
-        
-        console.log(`Запрос времени: ${new Date()}`);
-        
-        // Если есть новые заказы, отправляем уведомление
-        if (newOrders.length > 0) {
-            const message = `🆕 Получены новые заказы:\n${newOrders.map(order => `📦 ${order}`).join('\n')}`;
-            await bot.telegram.sendMessage(userId, message);
+
+        if (newOrders.length) {
+            // Получаем детальную информацию о маршрутах с новыми заказами
+            for (const route of routes) {
+                const routeOrders = route.Orders?.map(order => order.ExternalId) || [];
+                const hasNewOrders = routeOrders.some(orderId => newOrders.includes(orderId));
+
+                if (hasNewOrders) {
+                    const detailsResponse = await api.getRouteDetails(sessionId, [route.Id]);
+                    const routeDetails = detailsResponse.TL_Mobile_GetRoutesResponse.Routes[0];
+
+                    let messageText = `🆕 Новые заказы в маршруте ${routeDetails.Number}:\n\n`;
+
+                    // Перебираем все точки маршрута (пропускаем точку загрузки)
+                    for (let i = 1; i < routeDetails.Points.length; i++) {
+                        const point = routeDetails.Points[i];
+                        const pointOrder = point.Orders?.[0];
+
+                        if (pointOrder && newOrders.includes(pointOrder.ExternalId)) {
+                            messageText += `📦 Заказ: ${pointOrder.ExternalId}\n`;
+                            messageText += `📍 Адрес: ${point.Address}\n`;
+                            if (point.Description) {
+                                messageText += `👤 Получатель: ${point.Description}\n`;
+                            }
+                            if (point.Weight) {
+                                messageText += `⚖️ Вес: ${point.Weight} ${routeDetails.WeightUnit}\n`;
+                            }
+                            if (point.ArrivalTime) {
+                                const arrivalTime = new Date(point.ArrivalTime).toLocaleTimeString('ru-RU', {
+                                    hour: '2-digit',
+                                    minute: '2-digit'
+                                });
+                                messageText += `🕒 Ожидаемое время: ${arrivalTime}\n`;
+                            }
+                            messageText += `\n`;
+                        }
+                    }
+
+                    // Отправляем сообщение о новых заказах в маршруте
+                    await bot.telegram.sendMessage(userId, messageText);
+                }
+            }
         }
 
-        // Обновляем сохраненные заказы
-        lastKnownOrders.set(userId, currentOrders);
-
+        monitoring.updateLastKnownOrders(userId, currentOrders);
     } catch (error) {
-        console.error('Error checking new orders:', error);
+        console.error('Error checking orders:', error);
     }
 }
 
-async function startOrdersMonitoring(userId) {
+async function showRoutes(ctx, date) {
     try {
-        const session = await dbMethods.getSession(userId);
-        if (!session || !session.session_id) {
-            return false;
+        const session = await db.getSession(ctx.from.id);
+        if (!session?.session_id) {
+            return await ctx.reply('Вы не авторизованы', keyboards.getLoginKeyboard);
         }
 
-        // Проверяем новые заказы каждую минуту
-        const intervalId = setInterval(() => checkNewOrders(userId, session.session_id), intervalUpdates);
-        activeMonitoring.set(userId, intervalId);
-        return true;
+        const response = await api.getRoutes(session.session_id, date);
+
+        if (!response?.TL_Mobile_EnumRoutesResponse?.Routes) {
+            return await ctx.reply(`📭 Маршруты на ${date} не найдены`, 
+                keyboards.getMainKeyboard(monitoring.isMonitoringActive(ctx.from.id)));
+        }
+
+        const routes = response.TL_Mobile_EnumRoutesResponse.Routes;
+        const totalOrders = routes.reduce((sum, route) => sum + (route.Orders?.length || 0), 0);
+
+        if (totalOrders === 0) {
+            return await ctx.reply(`📭 На ${date} заказов нет`, 
+                keyboards.getMainKeyboard(monitoring.isMonitoringActive(ctx.from.id)));
+        }
+
+        // Получаем детальную информацию о каждом маршруте
+        for (const route of routes) {
+            const detailsResponse = await api.getRouteDetails(session.session_id, [route.Id]);
+            const routeDetails = detailsResponse.TL_Mobile_GetRoutesResponse.Routes[0];
+
+            let messageText = `🚚 Маршрут ${routes.indexOf(route) + 1}\n`;
+            messageText += `📝 Номер: ${routeDetails.Number}\n`;
+            messageText += `📦 Всего заказов: ${routeDetails.Points.length - 1}\n\n`; // -1 because first point is usually loading point
+
+            // Перебираем все точки маршрута (пропускаем первую точку загрузки)
+            for (let i = 1; i < routeDetails.Points.length; i++) {
+                const point = routeDetails.Points[i];
+                messageText += `📍 Точка ${point.Label}:\n`;
+                messageText += `📦 Cтатус: ${point.Action}\n`;
+                messageText += `📮 Адрес: ${point.Address}\n`;
+                if (point.Description) {
+                    messageText += `👤 Получатель: ${point.Description}\n`;
+                }
+                if (point.Orders && point.Orders.length > 0) {
+                    messageText += `🔹 Заказ: ${point.Orders[0].ExternalId}\n`;
+                    messageText += `⚖️ Вес: ${point.Weight} ${routeDetails.WeightUnit}\n`;
+                }
+                if (point.ArrivalTime) {
+                    const arrivalTime = new Date(point.ArrivalTime).toLocaleTimeString('ru-RU', {
+                        hour: '2-digit',
+                        minute: '2-digit'
+                    });
+                    messageText += point.Action === 'drop' ? `🕒 Доставил: ${arrivalTime}\n` : `🕒 Ожидаемое время: ${arrivalTime}\n`;
+                }
+                messageText += `\n`;
+            }
+
+            // Отправляем сообщение с информацией о маршруте
+            if (messageText.length > config.MAX_MESSAGE_LENGTH) {
+                // Разбиваем длинное сообщение на части
+                for (let i = 0; i < messageText.length; i += config.MAX_MESSAGE_LENGTH) {
+                    await ctx.reply(messageText.slice(i, i + config.MAX_MESSAGE_LENGTH));
+                }
+            } else {
+                await ctx.reply(messageText);
+            }
+        }
+
+        const statsMessage = `📊 Общая статистика:\nВсего маршрутов: ${routes.length}\nВсего заказов: ${totalOrders}`;
+
+        await ctx.reply(statsMessage, 
+            keyboards.getMainKeyboard(monitoring.isMonitoringActive(ctx.from.id)));
 
     } catch (error) {
-        console.error('Error starting orders monitoring:', error);
-        return false;
+        console.error('Error showing routes:', error);
+        await ctx.reply('❌ Произошла ошибка при получении маршрутов');
     }
 }
 
-const getMainKeyboard = (isMonitoringActive) => {
-    return Markup.keyboard([
-        ['📊 Маршруты', '👤 Статус'],
-        [isMonitoringActive ? '🔴 Остановить мониторинг' : '🟢 Запустить мониторинг'],
-        ['🚪 Выйти']
-    ]).resize();
-};
+function calculateWorkHours(timeRange) {
+    const [start, end] = timeRange.split('-');
+    const [startHours, startMinutes] = start.split('.').map(Number);
+    const [endHours, endMinutes] = end.split('.').map(Number);
+    
+    let hours = endHours - startHours;
+    let minutes = endMinutes - startMinutes;
+    
+    if (minutes < 0) {
+        hours--;
+        minutes += 60;
+    }
+    
+    return hours + (minutes / 60);
+}
 
-const getLoginKeyboard = Markup.keyboard([
-    ['🔑 Войти'],
-]).resize();
+function getDriverSurname(driverName) {
+    // Предполагаем, что номер всегда в конце и отделен пробелом
+    return driverName.split(' ')[0];
+}
 
+// Команды бота
 bot.command('start', async (ctx) => {
-    const session = await dbMethods.getSession(ctx.from.id);
-    const isMonitoringActive = activeMonitoring.has(ctx.from.id);
+    const session = await db.getSession(ctx.from.id);
+    const isMonitoringActive = monitoring.isMonitoringActive(ctx.from.id);
 
-    if (session && session.session_id) {
-        await ctx.reply('Выберите действие:', getMainKeyboard(isMonitoringActive));
+    if (session?.session_id) {
+        await ctx.reply('Выберите действие:', keyboards.getMainKeyboard(isMonitoringActive));
     } else {
-        await ctx.reply('Добро пожаловать! Нажмите кнопку "Войти" для начала работы:', getLoginKeyboard);
-    }
-});
-
-bot.command('monitor', async (ctx) => {
-    try {
-        const userId = ctx.from.id;
-
-        // Проверяем, не активен ли уже мониторинг
-        if (activeMonitoring.has(userId)) {
-            return await ctx.reply('⚠️ Мониторинг уже активен! Используйте /stopmonitor для отключения текущего мониторинга.');
-        }
-
-        const session = await dbMethods.getSession(userId);
-        
-        if (!session || !session.session_id) {
-            return await ctx.reply('Вы не авторизованы. Используйте /login для входа в систему.');
-        }
-
-        // Запускаем мониторинг
-        const started = await startOrdersMonitoring(userId);
-        
-        if (started) {
-            // Делаем первоначальную проверку заказов
-            await checkNewOrders(userId, session.session_id);
-            await ctx.reply('✅ Мониторинг новых заказов включен. Вы будете получать уведомления о новых заказах.');
-        } else {
-            await ctx.reply('❌ Не удалось запустить мониторинг. Проверьте авторизацию.');
-        }
-
-    } catch (error) {
-        console.error('Error in monitor command:', error);
-        await ctx.reply('❌ Произошла ошибка при включении мониторинга');
-    }
-});
-
-bot.command('stopmonitor', async (ctx) => {
-    try {
-        const userId = ctx.from.id;
-        const intervalId = activeMonitoring.get(userId);
-
-        if (!intervalId) {
-            return await ctx.reply('⚠️ Мониторинг не был активен.');
-        }
-
-        // Останавливаем интервал
-        clearInterval(intervalId);
-        
-        // Очищаем данные мониторинга
-        activeMonitoring.delete(userId);
-        lastKnownOrders.delete(userId);
-        
-        await ctx.reply('✅ Мониторинг новых заказов отключен.');
-    } catch (error) {
-        console.error('Error in stopmonitor command:', error);
-        await ctx.reply('❌ Произошла ошибка при отключении мониторинга');
+        await ctx.reply('Добро пожаловать! Нажмите кнопку "Войти" для начала работы:', 
+            keyboards.getLoginKeyboard);
     }
 });
 
 bot.command('login', async (ctx) => {
-    ctx.reply('Введите ClientCode:');
-    await dbMethods.saveSession(ctx.from.id, { 
+    await ctx.reply('Введите ClientCode:');
+    await db.saveSession(ctx.from.id, {
         user_id: ctx.from.id,
         client_code: null,
         login: null,
         password: null,
         session_id: null,
         driver_name: null,
-        step: 'clientCode'
+        step: config.STEPS.CLIENT_CODE
     });
 });
 
 bot.command('status', async (ctx) => {
-  console.log('Status command received from user:', ctx.from.id);
-    try {
-        const session = await dbMethods.getSession(ctx.from.id);
+    const session = await db.getSession(ctx.from.id);
+    const isMonitoringActive = monitoring.isMonitoringActive(ctx.from.id);
 
-        if (!session) {
-            return await ctx.reply('Вы не авторизованы');
-        }
-
-        if (session.session_id) {
-            return await ctx.reply(
-                `Статус: авторизован\n` +
-                `Клиент: ${session.client_code}\n` +
-                `Логин: ${session.login}\n` +
-                `Водитель: ${session.driver_name || 'Не указан'}\n` +
-                `SessionId: ${session.session_id}`
-            );
-        } else {
-            return await ctx.reply('Вы не авторизованы');
-        }
-    } catch (error) {
-        console.error('Error in status command:', error);
-        return await ctx.reply('Произошла ошибка при проверке статуса');
+    if (!session?.session_id) {
+        return await ctx.reply('Вы не авторизованы');
     }
+
+    const statusMessage = `Статус: авторизован\n` +
+        `Клиент: ${session.client_code}\n` +
+        `Логин: ${session.login}\n` +
+        `Водитель: ${session.driver_name || 'Не указан'}\n` +
+        `Мониторинг: ${isMonitoringActive ? '✅ Активен' : '❌ Не активен'}`;
+
+    await ctx.reply(statusMessage, keyboards.getMainKeyboard(isMonitoringActive));
 });
 
 bot.command('logout', async (ctx) => {
-    try {
-        const userId = ctx.from.id;
-        const session = await dbMethods.getSession(userId);
-        
-        if (session) {
-            // Останавливаем мониторинг, если он активен
-            const intervalId = activeMonitoring.get(userId);
-            if (intervalId) {
-                clearInterval(intervalId);
-                activeMonitoring.delete(userId);
-                lastKnownOrders.delete(userId);
-            }
-
-            await dbMethods.deleteSession(userId);
-            await ctx.reply('✅ Вы успешно вышли из системы');
-        } else {
-            await ctx.reply('⚠️ Вы не были авторизованы');
-        }
-    } catch (error) {
-        console.error('Error in logout command:', error);
-        await ctx.reply('❌ Произошла ошибка при выходе из системы');
-    }
-});
-
-bot.command('monitorstatus', async (ctx) => {
     const userId = ctx.from.id;
-    const isMonitoringActive = activeMonitoring.has(userId);
+    const session = await db.getSession(userId);
     
-    await ctx.reply(isMonitoringActive 
-        ? '✅ Мониторинг активен'
-        : '❌ Мониторинг не активен');
-});
-
-bot.command('routes', async (ctx) => {
-    try {
-        const session = await dbMethods.getSession(ctx.from.id);
-        
-        if (!session || !session.session_id) {
-            return await ctx.reply('Вы не авторизованы. Используйте /login для входа в систему.');
-        }
-
-        // Получаем аргументы команды
-        const args = ctx.message.text.split(' ');
-        let date;
-
-        if (args.length > 1) {
-            // Если дата указана в формате DD.MM.YYYY
-            if (/^\d{2}\.\d{2}\.\d{4}$/.test(args[1])) {
-                date = args[1];
-            } else {
-                return await ctx.reply('Неверный формат даты. Используйте формат ДД.ММ.ГГГГ (например, 09.02.2024)');
-            }
-        } else {
-            // Если дата не указана, используем текущую
-            const currentDate = new Date();
-            date = `${String(currentDate.getDate()).padStart(2, '0')}.${String(currentDate.getMonth() + 1).padStart(2, '0')}.${currentDate.getFullYear()}`;
-        }
-
-        const response = await getRoutes(session.session_id, date);
-        
-        if (response.TL_Mobile_EnumRoutesResponse) {
-            const routes = response.TL_Mobile_EnumRoutesResponse.Routes;
-            
-            if (routes.length === 0) {
-                return await ctx.reply(`Маршруты на ${date} не найдены`);
-            }
-
-            let formattedMessage = `📋 Список маршрутов на ${date}:\n\n`;
-            
-            routes.forEach((route, index) => {
-                formattedMessage += `🚚 Маршрут ${index + 1}:\n`;
-                
-                if (route.Orders && route.Orders.length > 0) {
-                    formattedMessage += '\n📦 Заказы:\n';
-                    route.Orders.forEach((order, orderIndex) => {
-                        formattedMessage += `${orderIndex + 1}. ${order.ExternalId}\n`;
-                    });
-                }
-                
-                formattedMessage += '\n';
-            });
-
-            await ctx.reply(formattedMessage);
-        } else {
-            await ctx.reply('Ошибка при получении маршрутов');
-        }
-    } catch (error) {
-        console.error('Error in routes command:', error);
-        await ctx.reply('Произошла ошибка при получении маршрутов');
+    if (session) {
+        monitoring.stopMonitoring(userId);
+        await db.deleteSession(userId);
+        await ctx.reply('✅ Вы успешно вышли из системы', keyboards.getLoginKeyboard);
+    } else {
+        await ctx.reply('⚠️ Вы не были авторизованы', keyboards.getLoginKeyboard);
     }
 });
 
+// Обработка действий с кнопками
 bot.action('routes_today', async (ctx) => {
-    const session = await dbMethods.getSession(ctx.from.id);
-    if (!session || !session.session_id) {
-        return await ctx.reply('Вы не авторизованы', getLoginKeyboard);
-    }
-
-    const currentDate = new Date();
-    const formattedDate = `${String(currentDate.getDate()).padStart(2, '0')}.${String(currentDate.getMonth() + 1).padStart(2, '0')}.${currentDate.getFullYear()}`;
-    
-    // Используем существующую функцию получения маршрутов
-    await showRoutes(ctx, formattedDate);
+    const currentDate = new Date().toLocaleDateString('ru-RU');
+    await showRoutes(ctx, currentDate);
 });
 
 bot.action('routes_select_date', async (ctx) => {
-    const session = await dbMethods.getSession(ctx.from.id);
-    if (!session || !session.session_id) {
-        return await ctx.reply('Вы не авторизованы', getLoginKeyboard);
+    const session = await db.getSession(ctx.from.id);
+    if (!session?.session_id) {
+        return await ctx.reply('Вы не авторизованы', keyboards.getLoginKeyboard);
     }
 
     await ctx.reply('Введите дату в формате ДД.ММ.ГГГГ (например, 09.02.2024):', 
-        getMainKeyboard(activeMonitoring.has(ctx.from.id)));
+        keyboards.getMainKeyboard(monitoring.isMonitoringActive(ctx.from.id)));
     
-    // Сохраняем состояние ожидания ввода даты
-    await dbMethods.saveSession(ctx.from.id, {
+    await db.saveSession(ctx.from.id, {
         ...session,
-        step: 'awaiting_date'
+        step: config.STEPS.AWAITING_DATE
     });
 });
 
-
-
+// Обработка текстовых сообщений
 bot.on('text', async (ctx) => {
     const text = ctx.message.text;
     const userId = ctx.from.id;
+    const session = await db.getSession(userId);
+    const isMonitoringActive = monitoring.isMonitoringActive(userId);
 
-    // Проверяем текущую сессию
-    const session = await dbMethods.getSession(userId);
-    const isMonitoringActive = activeMonitoring.has(userId);
-
-    // Сначала обрабатываем кнопки меню
+    // Обработка кнопок меню
     switch (text) {
         case '🔑 Войти':
-            ctx.reply('Введите ClientCode:');
-            await dbMethods.saveSession(ctx.from.id, { 
-                user_id: ctx.from.id,
+            await ctx.reply('Введите ClientCode:');
+            await db.saveSession(userId, {
+                user_id: userId,
                 client_code: null,
                 login: null,
                 password: null,
                 session_id: null,
                 driver_name: null,
-                step: 'clientCode'
+                step: config.STEPS.CLIENT_CODE
             });
             return;
 
         case '📊 Маршруты':
-            if (!session || !session.session_id) {
-                return await ctx.reply('Вы не авторизованы', getLoginKeyboard);
+            if (!session?.session_id) {
+                return await ctx.reply('Вы не авторизованы', keyboards.getLoginKeyboard);
             }
-            const keyboard = Markup.inlineKeyboard([
-                Markup.button.callback('На сегодня', 'routes_today'),
-                Markup.button.callback('Выбрать дату', 'routes_select_date')
-            ]);
-            await ctx.reply('Выберите дату для просмотра маршрутов:', keyboard);
+            await ctx.reply('Выберите дату для просмотра маршрутов:', keyboards.getRoutesKeyboard);
             return;
 
-        case '👤 Статус':
-            if (!session || !session.session_id) {
-                return await ctx.reply('Вы не авторизованы', getLoginKeyboard);
+        case '👤 Профиль':
+            const statusSession = await db.getSession(ctx.from.id);
+            const statusMonitoringActive = monitoring.isMonitoringActive(ctx.from.id);
+        
+            if (!statusSession?.session_id) {
+                return await ctx.reply('Вы не авторизованы');
             }
+        
             const statusMessage = `Статус: авторизован\n` +
-                `Клиент: ${session.client_code}\n` +
-                `Логин: ${session.login}\n` +
-                `Водитель: ${session.driver_name || 'Не указан'}\n` +
-                `Мониторинг: ${isMonitoringActive ? '✅ Активен' : '❌ Не активен'}`;
-            await ctx.reply(statusMessage, getMainKeyboard(isMonitoringActive));
+                `Клиент: ${statusSession.client_code}\n` +
+                `Логин: ${statusSession.login}\n` +
+                `Водитель: ${statusSession.driver_name || 'Не указан'}\n` +
+                `Мониторинг: ${statusMonitoringActive ? '✅ Активен' : '❌ Не активен'}`;
+        
+            await ctx.reply(statusMessage, keyboards.getMainKeyboard(statusMonitoringActive));
             return;
 
         case '🟢 Запустить мониторинг':
-            if (!session || !session.session_id) {
-                return await ctx.reply('Вы не авторизованы', getLoginKeyboard);
+            if (!session?.session_id) {
+                return await ctx.reply('Вы не авторизованы', keyboards.getLoginKeyboard);
             }
             if (isMonitoringActive) {
-                await ctx.reply('⚠️ Мониторинг уже активен!', getMainKeyboard(true));
-                return;
+                return await ctx.reply('⚠️ Мониторинг уже активен!', 
+                    keyboards.getMainKeyboard(true));
             }
-            const started = await startOrdersMonitoring(userId);
+            const started = monitoring.startMonitoring(
+                userId, 
+                session.session_id,
+                checkNewOrders,
+                config.INTERVAL_UPDATES
+            );
             if (started) {
                 await checkNewOrders(userId, session.session_id);
-                await ctx.reply('✅ Мониторинг новых заказов включен', getMainKeyboard(true));
+                await ctx.reply('✅ Мониторинг новых заказов включен', 
+                    keyboards.getMainKeyboard(true));
             }
             return;
 
         case '🔴 Остановить мониторинг':
-            if (!session || !session.session_id) {
-                return await ctx.reply('Вы не авторизованы', getLoginKeyboard);
-            }
-            const intervalId = activeMonitoring.get(userId);
-            if (intervalId) {
-                clearInterval(intervalId);
-                activeMonitoring.delete(userId);
-                lastKnownOrders.delete(userId);
-                await ctx.reply('✅ Мониторинг отключен', getMainKeyboard(false));
+            if (monitoring.stopMonitoring(userId)) {
+                await ctx.reply('✅ Мониторинг отключен', 
+                    keyboards.getMainKeyboard(false));
             } else {
-                await ctx.reply('⚠️ Мониторинг не был активен', getMainKeyboard(false));
+                await ctx.reply('⚠️ Мониторинг не был активен', 
+                    keyboards.getMainKeyboard(false));
             }
             return;
 
+        case '📝 Создать отчет':
+            if (!session?.session_id) {
+                return await ctx.reply('Вы не авторизованы', keyboards.getLoginKeyboard);
+            }
+            await ctx.reply('Введите время работы в формате "9.30-21.00":');
+            await db.saveSession(userId, {
+                ...session,
+                step: config.STEPS.AWAITING_WORK_TIME
+            });
+            return;
+
         case '🚪 Выйти':
-            if (session) {
-                const intervalId = activeMonitoring.get(userId);
-                if (intervalId) {
-                    clearInterval(intervalId);
-                    activeMonitoring.delete(userId);
-                    lastKnownOrders.delete(userId);
-                }
-                await dbMethods.deleteSession(userId);
-                await ctx.reply('Вы вышли из системы', getLoginKeyboard);
+            const logoutUserId = ctx.from.id;
+            const logoutSession = await db.getSession(logoutUserId);
+            
+            if (logoutSession) {
+                monitoring.stopMonitoring(logoutUserId);
+                await db.deleteSession(logoutUserId);
+                await ctx.reply('✅ Вы успешно вышли из системы', keyboards.getLoginKeyboard);
             } else {
-                await ctx.reply('Вы не были авторизованы', getLoginKeyboard);
+                await ctx.reply('⚠️ Вы не были авторизованы', keyboards.getLoginKeyboard);
             }
             return;
     }
 
-    // Затем обрабатываем ввод даты
-    if (session && session.step === 'awaiting_date') {
-        const dateText = ctx.message.text;
-        if (/^\d{2}\.\d{2}\.\d{4}$/.test(dateText)) {
-            await showRoutes(ctx, dateText);
-            await dbMethods.saveSession(ctx.from.id, {
+    // Обработка ввода даты
+    if (session?.step === config.STEPS.AWAITING_DATE) {
+        if (/^\d{2}\.\d{2}\.\d{4}$/.test(text)) {
+            await showRoutes(ctx, text);
+            await db.saveSession(ctx.from.id, {
                 ...session,
-                step: session.session_id ? 'authenticated' : 'clientCode'
+                step: session.session_id ? config.STEPS.AUTHENTICATED : config.STEPS.CLIENT_CODE
             });
         } else {
             await ctx.reply('❌ Неверный формат даты. Используйте формат ДД.ММ.ГГГГ', 
-                getMainKeyboard(activeMonitoring.has(ctx.from.id)));
+                keyboards.getMainKeyboard(isMonitoringActive));
         }
         return;
     }
 
-    // Наконец, обрабатываем процесс авторизации
-    if (session && session.step) {
+    // Обработка ввода времени для отчета
+    if (session?.step === config.STEPS.AWAITING_WORK_TIME) {
+        const timeRegex = /^\d{1,2}\.\d{2}-\d{1,2}\.\d{2}$/;
+        if (!timeRegex.test(text)) {
+            return await ctx.reply('❌ Неверный формат времени. Используйте формат "9.30-21.00"');
+        }
+    
+        try {
+            const currentDate = new Date().toLocaleDateString('ru-RU');
+            const workHours = calculateWorkHours(text);
+            const driverSurname = getDriverSurname(session.driver_name);
+    
+            const reportMessage = 
+                `📋 Отчет за ${currentDate}\n\n` +
+                `👤 ${driverSurname}\n` +
+                `🕒 ${text} (${workHours.toFixed(1)} ч.)`;
+    
+            await ctx.reply(reportMessage, keyboards.getMainKeyboard(monitoring.isMonitoringActive(userId)));
+            
+            await db.saveSession(userId, {
+                ...session,
+                step: config.STEPS.AUTHENTICATED
+            });
+        } catch (error) {
+            console.error('Error creating report:', error);
+            await ctx.reply('❌ Произошла ошибка при создании отчета');
+        }
+        return;
+    }
+
+    // Обработка процесса авторизации
+    if (session?.step) {
         switch (session.step) {
-            case 'clientCode':
-                const clientCode = ctx.message.text;
-                await dbMethods.saveSession(userId, {
+            case config.STEPS.CLIENT_CODE:
+                await db.saveSession(userId, {
                     ...session,
-                    client_code: clientCode,
-                    step: 'login'
+                    client_code: text,
+                    step: config.STEPS.LOGIN
                 });
                 await ctx.reply('Введите Login:');
                 break;
 
-            case 'login':
-                await dbMethods.saveSession(userId, {
+            case config.STEPS.LOGIN:
+                await db.saveSession(userId, {
                     ...session,
-                    login: ctx.message.text,
-                    step: 'password'
+                    login: text,
+                    step: config.STEPS.PASSWORD
                 });
                 await ctx.reply('Введите Password:');
                 break;
 
-            case 'password':
+            case config.STEPS.PASSWORD:
                 try {
-                    const response = await authenticateUser(
+                    const response = await api.authenticate(
                         session.client_code,
                         session.login,
-                        ctx.message.text
+                        text
                     );
 
                     if (response.TL_Mobile_LoginResponse.ErrorDescription) {
-                        await ctx.reply(`❌ Ошибка: ${response.TL_Mobile_LoginResponse.ErrorDescription}`, getLoginKeyboard);
-                        await dbMethods.deleteSession(userId);
+                        await ctx.reply(`❌ Ошибка: ${response.TL_Mobile_LoginResponse.ErrorDescription}`, 
+                            keyboards.getLoginKeyboard);
+                        await db.deleteSession(userId);
                     } else {
-                        const authenticatedSession = {
+                        await db.saveSession(userId, {
                             ...session,
-                            password: ctx.message.text,
+                            password: text,
                             session_id: response.TL_Mobile_LoginResponse.SessionId,
                             driver_name: response.TL_Mobile_LoginResponse.DriverName,
-                            step: 'authenticated'
-                        };
-                        await dbMethods.saveSession(userId, authenticatedSession);
-                        await ctx.reply('✅ Авторизация успешна!', getMainKeyboard(false));
+                            step: config.STEPS.AUTHENTICATED
+                        });
+                        await ctx.reply('✅ Авторизация успешна!', 
+                            keyboards.getMainKeyboard(false));
                     }
                 } catch (error) {
                     console.error('Authentication error:', error);
-                    await ctx.reply('❌ Ошибка авторизации', getLoginKeyboard);
-                    await dbMethods.deleteSession(userId);
+                    await ctx.reply('❌ Ошибка авторизации', keyboards.getLoginKeyboard);
+                    await db.deleteSession(userId);
                 }
-                break;
-
-            case 'authenticated':
-                // Игнорируем ввод текста в аутентифицированном состоянии
                 break;
         }
     } else {
-        // Если нет активной сессии, показываем клавиатуру для входа
-        await ctx.reply('Для начала работы необходимо войти в систему', getLoginKeyboard);
+        await ctx.reply('Для начала работы необходимо войти в систему', 
+            keyboards.getLoginKeyboard);
     }
 });
-
-async function showRoutes(ctx, date) {
-    try {
-        const session = await dbMethods.getSession(ctx.from.id);
-        if (!session || !session.session_id) {
-            return await ctx.reply('Вы не авторизованы', getLoginKeyboard);
-        }
-
-        const response = await getRoutes(session.session_id, date);
-        
-        if (response.TL_Mobile_EnumRoutesResponse) {
-            const routes = response.TL_Mobile_EnumRoutesResponse.Routes;
-            
-            if (!routes || routes.length === 0) {
-                await ctx.reply(`📭 Маршруты на ${date} не найдены`, getMainKeyboard(activeMonitoring.has(ctx.from.id)));
-                return;
-            }
-
-            // Разбиваем большой список на части, если он слишком длинный
-            const maxMessageLength = 4096; // Максимальная длина сообщения в Telegram
-            let formattedMessage = `📋 Список маршрутов на ${date}:\n\n`;
-            let currentMessage = formattedMessage;
-            
-            for (let i = 0; i < routes.length; i++) {
-                const route = routes[i];
-                let routeMessage = `🚚 Маршрут ${i + 1}:\n`;
-                
-                if (route.Orders && route.Orders.length > 0) {
-                    routeMessage += '\n📦 Заказы:\n';
-                    route.Orders.forEach((order, orderIndex) => {
-                        routeMessage += `${orderIndex + 1}. ${order.ExternalId}\n`;
-                    });
-                } else {
-                    routeMessage += '\n❌ Нет заказов\n';
-                }
-                
-                routeMessage += '\n';
-
-                // Проверяем, не превысит ли добавление нового маршрута максимальную длину
-                if ((currentMessage + routeMessage).length > maxMessageLength) {
-                    // Отправляем текущее сообщение и начинаем новое
-                    await ctx.reply(currentMessage, { parse_mode: 'HTML' });
-                    currentMessage = routeMessage;
-                } else {
-                    currentMessage += routeMessage;
-                }
-            }
-
-            // Отправляем последнее сообщение
-            if (currentMessage) {
-                await ctx.reply(currentMessage, { 
-                    parse_mode: 'HTML',
-                    ...getMainKeyboard(activeMonitoring.has(ctx.from.id))
-                });
-            }
-
-            // Добавляем статистику
-            const totalOrders = routes.reduce((sum, route) => sum + (route.Orders ? route.Orders.length : 0), 0);
-            const statsMessage = `\n📊 Статистика:\n` +
-                `Всего маршрутов: ${routes.length}\n` +
-                `Всего заказов: ${totalOrders}`;
-            
-            await ctx.reply(statsMessage, getMainKeyboard(activeMonitoring.has(ctx.from.id)));
-
-        } else {
-            await ctx.reply('❌ Ошибка при получении маршрутов', 
-                getMainKeyboard(activeMonitoring.has(ctx.from.id)));
-        }
-    } catch (error) {
-        console.error('Error showing routes:', error);
-        await ctx.reply('❌ Произошла ошибка при получении маршрутов', 
-            getMainKeyboard(activeMonitoring.has(ctx.from.id)));
-    }
-}
-
-async function authenticateUser(clientCode, login, password) {
-  console.log(clientCode, login, password)
-    try {
-        const response = await axios.post('http://vrp.logdep.ru/dl/storage', {
-            TL_Mobile_LoginRequest: {
-                ClientCode: clientCode,
-                DeviceInfo: "Telegram Bot Device",
-                Login: login,
-                Password: password
-            }
-        });
-        return response.data;
-    } catch (error) {
-        console.error('Authentication error:', error);
-        throw error;
-    }
-}
-
-async function getRoutes(sessionId, date) {
-    try {
-        const response = await axios.post('http://vrp.logdep.ru/dl/storage', {
-            TL_Mobile_EnumRoutesRequest: {
-                Date: date,
-                SessionId: sessionId
-            }
-        });
-        return response.data;
-    } catch (error) {
-        console.error('Error getting routes:', error);
-        throw error;
-    }
-}
 
 bot.launch();
 
 process.once('SIGINT', () => {
     bot.stop('SIGINT');
     db.close();
+});
+
+process.on('uncaughtException', (error) => {
+    console.error('Uncaught Exception:', error);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
 });
