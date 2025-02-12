@@ -4,43 +4,8 @@ const db = require('./database');
 const api = require('./api');
 const keyboards = require('./keyboards');
 const monitoring = require('./monitoring');
-//const { message } = require('telegraf/filters');
 
 const bot = new Telegraf(config.TELEGRAM_TOKEN);
-
-// async function checkNewOrders(userId, sessionId) {
-//     try {
-//         const currentDate = new Date().toLocaleDateString('ru-RU');
-//         const response = await api.getRoutes(sessionId, currentDate);
-        
-//         if (!response?.TL_Mobile_EnumRoutesResponse?.Routes) return;
-
-//         const currentOrders = new Set(
-//             response.TL_Mobile_EnumRoutesResponse.Routes
-//                 .flatMap(route => route.Orders?.map(order => order.ExternalId) || [])
-//         );
-
-//         // Если заказов нет и это первая проверка
-//         if (currentOrders.size === 0 && !monitoring.getLastKnownOrders(userId).size) {
-//             await bot.telegram.sendMessage(userId, `📭 На ${currentDate} заказов нет`);
-//             return;
-//         }
-
-//         const previousOrders = monitoring.getLastKnownOrders(userId);
-//         const newOrders = [...currentOrders].filter(order => !previousOrders.has(order));
-
-//         if (newOrders.length) {
-//             await bot.telegram.sendMessage(
-//                 userId, 
-//                 `🆕 Новые заказы:\n${newOrders.map(order => `📦 ${order}`).join('\n')}`
-//             );
-//         }
-
-//         monitoring.updateLastKnownOrders(userId, currentOrders);
-//     } catch (error) {
-//         console.error('Error checking orders:', error);
-//     }
-// }
 
 async function checkNewOrders(userId, sessionId) {
     try {
@@ -205,7 +170,6 @@ function calculateWorkHours(timeRange) {
 }
 
 function getDriverSurname(driverName) {
-    // Предполагаем, что номер всегда в конце и отделен пробелом
     return driverName.split(' ')[0];
 }
 

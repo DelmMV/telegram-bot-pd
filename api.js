@@ -7,6 +7,11 @@ const api = axios.create({
 });
 
 class ApiService {
+  isSessionExpired(response) {
+          return response?.TL_Mobile_EnumRoutesResponse?.ErrorCode === 'Exception' &&
+                 response?.TL_Mobile_EnumRoutesResponse?.ErrorDescription === 'SessionNotFound';
+      }
+
     async authenticate(clientCode, login, password) {
         try {
             const response = await api.post('', {
@@ -23,7 +28,7 @@ class ApiService {
             throw error;
         }
     }
-    
+
     async getRouteDetails(sessionId, routeIds) {
         try {
             const response = await api.post('', {
@@ -33,6 +38,11 @@ class ApiService {
                     WithTrackPoints: true
                 }
             });
+
+            if (this.isSessionExpired(response.data)) {
+                throw { isSessionExpired: true };
+            }
+
             return response.data;
         } catch (error) {
             console.error('Error getting route details:', error);
@@ -48,6 +58,11 @@ class ApiService {
                     SessionId: sessionId
                 }
             });
+
+            if (this.isSessionExpired(response.data)) {
+                throw { isSessionExpired: true };
+            }
+
             return response.data;
         } catch (error) {
             console.error('Error getting routes:', error);
