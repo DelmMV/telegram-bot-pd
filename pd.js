@@ -9,8 +9,23 @@ const bot = new Telegraf(config.TELEGRAM_TOKEN);
 
 async function checkNewOrders(userId, sessionId) {
     try {
+        const session = await db.getSession(userId);
+        const credentials = {
+            clientCode: session.client_code,
+            login: session.login,
+            password: session.password
+        };
+
         const currentDate = new Date().toLocaleDateString('ru-RU');
-        const response = await api.getRoutes(sessionId, currentDate);
+        const result = await api.getRoutes(sessionId, currentDate, credentials);
+
+        if (result.sessionUpdated) {
+            session.session_id = result.newSessionId;
+            await db.saveSession(userId, session);
+            sessionId = result.newSessionId;
+        }
+
+        const response = result.data;
         
         if (!response?.TL_Mobile_EnumRoutesResponse?.Routes) return;
 
@@ -19,7 +34,6 @@ async function checkNewOrders(userId, sessionId) {
             routes.flatMap(route => route.Orders?.map(order => order.ExternalId) || [])
         );
 
-        // Если заказов нет и это первая проверка
         if (currentOrders.size === 0 && !monitoring.getLastKnownOrders(userId).size) {
             await bot.telegram.sendMessage(userId, `📭 На ${currentDate} заказов нет`);
             return;
@@ -29,18 +43,22 @@ async function checkNewOrders(userId, sessionId) {
         const newOrders = [...currentOrders].filter(order => !previousOrders.has(order));
 
         if (newOrders.length) {
-            // Получаем детальную информацию о маршрутах с новыми заказами
             for (const route of routes) {
                 const routeOrders = route.Orders?.map(order => order.ExternalId) || [];
                 const hasNewOrders = routeOrders.some(orderId => newOrders.includes(orderId));
 
                 if (hasNewOrders) {
-                    const detailsResponse = await api.getRouteDetails(sessionId, [route.Id]);
-                    const routeDetails = detailsResponse.TL_Mobile_GetRoutesResponse.Routes[0];
+                    const detailsResult = await api.getRouteDetails(sessionId, [route.Id], credentials);
+                    
+                    if (detailsResult.sessionUpdated) {
+                        session.session_id = detailsResult.newSessionId;
+                        await db.saveSession(userId, session);
+                        sessionId = detailsResult.newSessionId;
+                    }
 
+                    const routeDetails = detailsResult.data.TL_Mobile_GetRoutesResponse.Routes[0];
                     let messageText = `🆕 Новые заказы в маршруте ${routeDetails.Number}:\n\n`;
 
-                    // Перебираем все точки маршрута (пропускаем точку загрузки)
                     for (let i = 1; i < routeDetails.Points.length; i++) {
                         const point = routeDetails.Points[i];
                         const pointOrder = point.Orders?.[0];
@@ -65,15 +83,35 @@ async function checkNewOrders(userId, sessionId) {
                         }
                     }
 
-                    // Отправляем сообщение о новых заказах в маршруте
                     await bot.telegram.sendMessage(userId, messageText);
                 }
             }
         }
 
         monitoring.updateLastKnownOrders(userId, currentOrders);
+
     } catch (error) {
         console.error('Error checking orders:', error);
+        
+        if (error.isSessionExpired) {
+            const session = await db.getSession(userId);
+            const credentials = {
+                clientCode: session.client_code,
+                login: session.login,
+                password: session.password
+            };
+
+            try {
+                const authResponse = await api.refreshSession(credentials);
+                session.session_id = authResponse;
+                await db.saveSession(userId, session);
+                await checkNewOrders(userId, authResponse);
+            } catch (refreshError) {
+                console.error('Session refresh error:', refreshError);
+                await bot.telegram.sendMessage(userId, 'Ошибка обновления сессии. Пожалуйста, авторизуйтесь заново через /start');
+                monitoring.stopMonitoring(userId);
+            }
+        }
     }
 }
 
@@ -84,7 +122,20 @@ async function showRoutes(ctx, date) {
             return await ctx.reply('Вы не авторизованы', keyboards.getLoginKeyboard);
         }
 
-        const response = await api.getRoutes(session.session_id, date);
+        const credentials = {
+            clientCode: session.client_code,
+            login: session.login,
+            password: session.password
+        };
+
+        const result = await api.getRoutes(session.session_id, date, credentials);
+
+        if (result.sessionUpdated) {
+            session.session_id = result.newSessionId;
+            await db.saveSession(ctx.from.id, session);
+        }
+
+        const response = result.data;
 
         if (!response?.TL_Mobile_EnumRoutesResponse?.Routes) {
             return await ctx.reply(`📭 Маршруты на ${date} не найдены`, 
@@ -99,16 +150,20 @@ async function showRoutes(ctx, date) {
                 keyboards.getMainKeyboard(monitoring.isMonitoringActive(ctx.from.id)));
         }
 
-        // Получаем детальную информацию о каждом маршруте
         for (const route of routes) {
-            const detailsResponse = await api.getRouteDetails(session.session_id, [route.Id]);
-            const routeDetails = detailsResponse.TL_Mobile_GetRoutesResponse.Routes[0];
+            const detailsResult = await api.getRouteDetails(session.session_id, [route.Id], credentials);
+            
+            if (detailsResult.sessionUpdated) {
+                session.session_id = detailsResult.newSessionId;
+                await db.saveSession(ctx.from.id, session);
+            }
+
+            const routeDetails = detailsResult.data.TL_Mobile_GetRoutesResponse.Routes[0];
 
             let messageText = `🚚 Маршрут ${routes.indexOf(route) + 1}\n`;
             messageText += `📝 Номер: ${routeDetails.Number}\n`;
-            messageText += `📦 Всего заказов: ${routeDetails.Points.length - 1}\n\n`; // -1 because first point is usually loading point
+            messageText += `📦 Всего заказов: ${routeDetails.Points.length - 1}\n\n`;
 
-            // Перебираем все точки маршрута (пропускаем первую точку загрузки)
             for (let i = 1; i < routeDetails.Points.length; i++) {
                 const point = routeDetails.Points[i];
                 messageText += `📍 Точка ${point.Label}:\n`;
@@ -131,9 +186,7 @@ async function showRoutes(ctx, date) {
                 messageText += `\n`;
             }
 
-            // Отправляем сообщение с информацией о маршруте
             if (messageText.length > config.MAX_MESSAGE_LENGTH) {
-                // Разбиваем длинное сообщение на части
                 for (let i = 0; i < messageText.length; i += config.MAX_MESSAGE_LENGTH) {
                     await ctx.reply(messageText.slice(i, i + config.MAX_MESSAGE_LENGTH));
                 }
@@ -149,7 +202,27 @@ async function showRoutes(ctx, date) {
 
     } catch (error) {
         console.error('Error showing routes:', error);
-        await ctx.reply('❌ Произошла ошибка при получении маршрутов');
+        
+        if (error.isSessionExpired) {
+            const session = await db.getSession(ctx.from.id);
+            const credentials = {
+                clientCode: session.client_code,
+                login: session.login,
+                password: session.password
+            };
+
+            try {
+                const authResponse = await api.refreshSession(credentials);
+                session.session_id = authResponse;
+                await db.saveSession(ctx.from.id, session);
+                await showRoutes(ctx, date);
+            } catch (refreshError) {
+                console.error('Session refresh error:', refreshError);
+                await ctx.reply('Ошибка обновления сессии. Пожалуйста, авторизуйтесь заново через /start');
+            }
+        } else {
+            await ctx.reply('❌ Произошла ошибка при получении маршрутов');
+        }
     }
 }
 
