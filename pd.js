@@ -34,11 +34,6 @@ async function checkNewOrders(userId, sessionId) {
             routes.flatMap(route => route.Orders?.map(order => order.ExternalId) || [])
         );
 
-        if (currentOrders.size === 0 && !monitoring.getLastKnownOrders(userId).size) {
-            await bot.telegram.sendMessage(userId, `📭 На ${currentDate} заказов нет`);
-            return;
-        }
-
         const previousOrders = monitoring.getLastKnownOrders(userId);
         const newOrders = [...currentOrders].filter(order => !previousOrders.has(order));
 
