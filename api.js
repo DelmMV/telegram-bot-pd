@@ -133,6 +133,50 @@ class ApiService {
             };
         }
     }
+    
+    async getOrderDetails(sessionId, orderIds, credentials) {
+        try {
+            const response = await api.post('', {
+                TL_Mobile_GetOrdersRequest: {
+                    Orders: orderIds,
+                    SessionId: sessionId
+                }
+            });
+    
+            if (this.isSessionExpired(response.data)) {
+                if (!credentials) {
+                    throw new Error('Session expired and no credentials provided');
+                }
+    
+                const newSessionId = await this.refreshSession(credentials);
+                
+                const newResponse = await api.post('', {
+                    TL_Mobile_GetOrdersRequest: {
+                        Orders: orderIds,
+                        SessionId: newSessionId
+                    }
+                });
+    
+                return {
+                    data: newResponse.data,
+                    newSessionId,
+                    sessionUpdated: true
+                };
+            }
+    
+            return {
+                data: response.data,
+                sessionUpdated: false
+            };
+        } catch (error) {
+            console.error('Error getting order details:', error);
+            throw {
+                isSessionExpired: this.isSessionExpired(error?.response?.data),
+                originalError: error
+            };
+        }
+    }
 }
+
 
 module.exports = new ApiService();

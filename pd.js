@@ -7,6 +7,23 @@ const monitoring = require('./monitoring');
 
 const bot = new Telegraf(config.TELEGRAM_TOKEN);
 
+const ORDER_STATES = {
+    '51e45c11-d5c7-4383-8fc4-a2e2e1781230': 'Отменён',
+    'dfab6563-55b8-475d-aac5-01b6705265cd': 'Новый',
+    '8b176fdd-4718-46eb-b4f6-1cf487e5353b': 'Доставляется',
+    'b107b2e5-fe96-46ec-9c1d-7248d77e8383': 'Выполнен (сайт)',
+    'ceb8edd8-a0d9-4116-a8ee-a6c0be89103b': 'Выполнен (нал)',
+    'd4535403-e4f6-4888-859e-098b7829b3a6': 'Выполнен (безнал)',
+    '01c157f5-ec6a-47b6-a655-981489e6022a': 'Запланирован',
+    '3e3d9e5d-b04a-4950-97f5-f6060b5362b6': 'В машине',
+    'e11e0bf2-4e34-4789-bdb6-b6c284f93bbf': 'Частично выполнен',
+    '50b9348e-1da1-44e3-b84b-88b68da829a4': 'Отложен'
+};
+
+function getOrderStatusName(statusId) {
+    return ORDER_STATES[statusId] || 'Неизвестный статус';
+}
+
 async function checkNewOrders(userId, sessionId) {
     try {
         const session = await db.getSession(userId);
@@ -26,7 +43,6 @@ async function checkNewOrders(userId, sessionId) {
         }
 
         const response = result.data;
-        
         if (!response?.TL_Mobile_EnumRoutesResponse?.Routes) return;
 
         const routes = response.TL_Mobile_EnumRoutesResponse.Routes;
@@ -52,6 +68,22 @@ async function checkNewOrders(userId, sessionId) {
                     }
 
                     const routeDetails = detailsResult.data.TL_Mobile_GetRoutesResponse.Routes[0];
+
+                    // Получаем orderIds для детальной информации
+                    const orderIds = routeDetails.Points.flatMap(point => 
+                        point.Orders?.map(order => order.Id) || []
+                    ).filter(id => id);
+
+                    // Получаем детальную информацию о заказах
+                    const orderDetailsResult = await api.getOrderDetails(sessionId, orderIds, credentials);
+                    if (orderDetailsResult.sessionUpdated) {
+                        session.session_id = orderDetailsResult.newSessionId;
+                        await db.saveSession(userId, session);
+                        sessionId = orderDetailsResult.newSessionId;
+                    }
+
+                    const orders = orderDetailsResult.data.TL_Mobile_GetOrdersResponse.Orders;
+
                     let messageText = `🆕 Новые заказы в маршруте ${routeDetails.Number}:\n\n`;
 
                     for (let i = 1; i < routeDetails.Points.length; i++) {
@@ -59,26 +91,77 @@ async function checkNewOrders(userId, sessionId) {
                         const pointOrder = point.Orders?.[0];
 
                         if (pointOrder && newOrders.includes(pointOrder.ExternalId)) {
+                            const orderDetails = orders.find(o => o.Id === pointOrder.Id);
+
                             messageText += `📦 Заказ: ${pointOrder.ExternalId}\n`;
                             messageText += `📍 Адрес: ${point.Address}\n`;
+                            
                             if (point.Description) {
                                 messageText += `👤 Получатель: ${point.Description}\n`;
                             }
+
+                            if (orderDetails?.To?.ContactPhone) {
+                                messageText += `📱 Телефон: ${orderDetails.To.ContactPhone}\n`;
+                            }
+
                             if (point.Weight) {
                                 messageText += `⚖️ Вес: ${point.Weight} ${routeDetails.WeightUnit}\n`;
                             }
-                            if (point.ArrivalTime) {
-                                const arrivalTime = new Date(point.ArrivalTime).toLocaleTimeString('ru-RU', {
+
+                            if (orderDetails?.InvoiceTotal) {
+                                messageText += `💰 Стоимость: ${orderDetails.InvoiceTotal} руб.\n`;
+                            }
+
+                            if (orderDetails?.Comment) {
+                                messageText += `📝 Комментарий: ${orderDetails.Comment}\n`;
+                            }
+
+                            if(orderDetails?.To?. StartTime && orderDetails?.To?.EndTime){
+                                const startTime = new Date(orderDetails.To.StartTime).toLocaleTimeString('ru-RU', {
                                     hour: '2-digit',
                                     minute: '2-digit'
                                 });
-                                messageText += `🕒 Ожидаемое время: ${arrivalTime}\n`;
+                                const endTime = new Date(orderDetails.To.EndTime).toLocaleTimeString('ru-RU', {
+                                    hour: '2-digit',
+                                    minute: '2-digit'
+                                });
+                                messageText += `⏰ Временное окно: ${startTime} - ${endTime}\n`;
                             }
+
+                            // Добавляем информацию о временном окне доставки, если она есть
+                            if (orderDetails?.To?.StartTime && orderDetails?.To?.EndTime) {
+                                const startTime = new Date(orderDetails.To.StartTime).toLocaleTimeString('ru-RU', {
+                                    hour: '2-digit',
+                                    minute: '2-digit'
+                                });
+                                const endTime = new Date(orderDetails.To.EndTime).toLocaleTimeString('ru-RU', {
+                                    hour: '2-digit',
+                                    minute: '2-digit'
+                                });
+                                messageText += `⏰ Временное окно: ${startTime} - ${endTime}\n`;
+                            }
+
                             messageText += `\n`;
                         }
                     }
 
-                    await bot.telegram.sendMessage(userId, messageText);
+                    // Добавляем информацию о маршруте
+                    messageText += `📊 Информация о маршруте:\n`;
+                    messageText += `🚚 Номер маршрута: ${routeDetails.Number}\n`;
+                    if (routeDetails.Distance) {
+                        messageText += `📏 Дистанция: ${routeDetails.Distance} км\n`;
+                    }
+                    messageText += `📦 Всего точек в маршруте: ${routeDetails.Points.length - 1}\n`;
+
+                    // Отправляем сообщение с учетом ограничения длины
+                    if (messageText.length > config.MAX_MESSAGE_LENGTH) {
+                        for (let i = 0; i < messageText.length; i += config.MAX_MESSAGE_LENGTH) {
+                            await bot.telegram.sendMessage(userId, 
+                                messageText.slice(i, i + config.MAX_MESSAGE_LENGTH));
+                        }
+                    } else {
+                        await bot.telegram.sendMessage(userId, messageText);
+                    }
                 }
             }
         }
@@ -103,7 +186,8 @@ async function checkNewOrders(userId, sessionId) {
                 await checkNewOrders(userId, authResponse);
             } catch (refreshError) {
                 console.error('Session refresh error:', refreshError);
-                await bot.telegram.sendMessage(userId, 'Ошибка обновления сессии. Пожалуйста, авторизуйтесь заново через /start');
+                await bot.telegram.sendMessage(userId, 
+                    'Ошибка обновления сессии. Пожалуйста, авторизуйтесь заново через /start');
                 monitoring.stopMonitoring(userId);
             }
         }
@@ -138,12 +222,20 @@ async function showRoutes(ctx, date) {
         }
 
         const routes = response.TL_Mobile_EnumRoutesResponse.Routes;
-        const totalOrders = routes.reduce((sum, route) => sum + (route.Orders?.length || 0), 0);
+        const totalOrders = routes.reduce((sum, route) => {
+            if (route.Orders && Array.isArray(route.Orders)) {
+                return sum + route.Orders.length;
+            }
+            return sum;
+        }, 0);
 
         if (totalOrders === 0) {
             return await ctx.reply(`📭 На ${date} заказов нет`, 
                 keyboards.getMainKeyboard(monitoring.isMonitoringActive(ctx.from.id)));
         }
+
+        let totalCashAmount = 0;
+        let totalNonCashAmount = 0;
 
         for (const route of routes) {
             const detailsResult = await api.getRouteDetails(session.session_id, [route.Id], credentials);
@@ -154,31 +246,102 @@ async function showRoutes(ctx, date) {
             }
 
             const routeDetails = detailsResult.data.TL_Mobile_GetRoutesResponse.Routes[0];
+            const orderIds = routeDetails.Points.flatMap(point => 
+                point.Orders?.map(order => order.Id) || []
+            ).filter(id => id);
 
+            const orderDetailsResult = await api.getOrderDetails(session.session_id, orderIds, credentials);
+            if (orderDetailsResult.sessionUpdated) {
+                session.session_id = orderDetailsResult.newSessionId;
+                await db.saveSession(ctx.from.id, session);
+            }
+
+            const orders = orderDetailsResult.data.TL_Mobile_GetOrdersResponse.Orders;
+            let routeCashAmount = 0;
+            let routeNonCashAmount = 0;
+            
             let messageText = `🚚 Маршрут ${routes.indexOf(route) + 1}\n`;
             messageText += `📝 Номер: ${routeDetails.Number}\n`;
-            messageText += `📦 Всего заказов: ${routeDetails.Points.length - 1}\n\n`;
+            messageText += `📦 Всего точек: ${routeDetails.Points.length - 1}\n\n`;
 
             for (let i = 1; i < routeDetails.Points.length; i++) {
                 const point = routeDetails.Points[i];
                 messageText += `📍 Точка ${point.Label}:\n`;
-                messageText += `📦 Cтатус: ${point.Action}\n`;
+                
+                // Проверяем наличие Orders и первого заказа
+                if (point.Orders && point.Orders.length > 0 && point.Orders[0].ExternalId) {
+                    messageText += `🔹 Заказ: ${point.Orders[0].ExternalId}\n`;
+                }
+                
                 messageText += `📮 Адрес: ${point.Address}\n`;
+                
                 if (point.Description) {
                     messageText += `👤 Получатель: ${point.Description}\n`;
                 }
+
                 if (point.Orders && point.Orders.length > 0) {
-                    messageText += `🔹 Заказ: ${point.Orders[0].ExternalId}\n`;
-                    messageText += `⚖️ Вес: ${point.Weight} ${routeDetails.WeightUnit}\n`;
-                }
-                if (point.ArrivalTime) {
-                    const arrivalTime = new Date(point.ArrivalTime).toLocaleTimeString('ru-RU', {
-                        hour: '2-digit',
-                        minute: '2-digit'
-                    });
-                    messageText += point.Action === 'drop' ? `🕒 Доставил: ${arrivalTime}\n` : `🕒 Ожидаемое время: ${arrivalTime}\n`;
+                    const orderDetails = orders.find(o => o.Id === point.Orders[0].Id);
+                    
+                    if (point.Weight) {
+                        messageText += `⚖️ Вес: ${point.Weight} ${routeDetails.WeightUnit}\n`;
+                    }
+                    
+                    if (orderDetails) {
+                        if (orderDetails.CustomState) {
+                            messageText += `📊 Статус: ${getOrderStatusName(orderDetails.CustomState)}\n`;
+                            
+                            if (orderDetails.InvoiceTotal) {
+                                const amount = parseFloat(orderDetails.InvoiceTotal);
+                                
+                                if (orderDetails.CustomState === 'ceb8edd8-a0d9-4116-a8ee-a6c0be89103b') {
+                                    routeCashAmount += amount;
+                                    totalCashAmount += amount;
+                                } else if (orderDetails.CustomState === 'd4535403-e4f6-4888-859e-098b7829b3a6') {
+                                    routeNonCashAmount += amount;
+                                    totalNonCashAmount += amount;
+                                }
+                            }
+                        }
+
+                        if (orderDetails.InvoiceTotal) {
+                            messageText += `💰 Стоимость: ${orderDetails.InvoiceTotal} руб.\n`;
+                        }
+
+                        if (orderDetails.Comment) {
+                            messageText += `📝 Комментарий: ${orderDetails.Comment}\n`;
+                        }
+
+                        if (orderDetails.To?.ContactPhone) {
+                            messageText += `📱 Телефон: ${orderDetails.To.ContactPhone}\n`;
+                        }
+
+                        if (orderDetails.To?.StartTime && orderDetails.To?.EndTime) {
+                            const startTime = new Date(orderDetails.To.StartTime).toLocaleTimeString('ru-RU', {
+                                hour: '2-digit',
+                                minute: '2-digit'
+                            });
+                            const endTime = new Date(orderDetails.To.EndTime).toLocaleTimeString('ru-RU', {
+                                hour: '2-digit',
+                                minute: '2-digit'
+                            });
+                            messageText += `⏰ Временное окно: ${startTime} - ${endTime}\n`;
+                        }
+                    }
                 }
                 messageText += `\n`;
+            }
+
+            // Добавляем финансовую информацию по маршруту
+            const routeTotalAmount = routeCashAmount + routeNonCashAmount;
+            if (routeTotalAmount > 0) {
+                messageText += `💰 Финансы по маршруту:\n`;
+                if (routeCashAmount > 0) {
+                    messageText += `├ 💵 Наличные: ${routeCashAmount.toFixed(2)} руб.\n`;
+                }
+                if (routeNonCashAmount > 0) {
+                    messageText += `├ 💳 Безналичные: ${routeNonCashAmount.toFixed(2)} руб.\n`;
+                }
+                messageText += `└ 📈 Всего: ${routeTotalAmount.toFixed(2)} руб.\n`;
             }
 
             if (messageText.length > config.MAX_MESSAGE_LENGTH) {
@@ -190,7 +353,17 @@ async function showRoutes(ctx, date) {
             }
         }
 
-        const statsMessage = `📊 Общая статистика:\nВсего маршрутов: ${routes.length}\nВсего заказов: ${totalOrders}`;
+        // Подсчет итоговой суммы
+        const totalAmount = totalCashAmount + totalNonCashAmount;
+
+        const statsMessage = `📊 Общая статистика:\n\n` +
+            `💰 Финансы:\n` +
+            `├ 💵 Наличные: ${totalCashAmount.toFixed(2)} руб.\n` +
+            `├ 💳 Безналичные: ${totalNonCashAmount.toFixed(2)} руб.\n` +
+            `└ 📈 Всего: ${totalAmount.toFixed(2)} руб.\n\n` +
+            `📦 Информация о маршрутах:\n` +
+            `├ 🚚 Всего маршрутов: ${routes.length}\n` +
+            `└ 📋 Всего заказов: ${totalOrders}`;
 
         await ctx.reply(statsMessage, 
             keyboards.getMainKeyboard(monitoring.isMonitoringActive(ctx.from.id)));
