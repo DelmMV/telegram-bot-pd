@@ -621,7 +621,7 @@ bot.on('text', async (ctx) => {
             const driverSurname = getDriverSurname(session.driver_name);
     
             const reportMessage = 
-                `📋 Отчет за ${currentDate}\n\n` +
+                `📋 ${currentDate}\n` +
                 `👤 ${driverSurname}\n` +
                 `🕒 ${text} (${workHours.toFixed(1)} ч.)`;
     
