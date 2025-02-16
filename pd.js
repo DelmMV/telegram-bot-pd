@@ -116,18 +116,6 @@ async function checkNewOrders(userId, sessionId) {
                                 messageText += `📝 Комментарий: ${orderDetails.Comment}\n`;
                             }
 
-                            if(orderDetails?.To?. StartTime && orderDetails?.To?.EndTime){
-                                const startTime = new Date(orderDetails.To.StartTime).toLocaleTimeString('ru-RU', {
-                                    hour: '2-digit',
-                                    minute: '2-digit'
-                                });
-                                const endTime = new Date(orderDetails.To.EndTime).toLocaleTimeString('ru-RU', {
-                                    hour: '2-digit',
-                                    minute: '2-digit'
-                                });
-                                messageText += `⏰ Временное окно: ${startTime} - ${endTime}\n`;
-                            }
-
                             // Добавляем информацию о временном окне доставки, если она есть
                             if (orderDetails?.To?.StartTime && orderDetails?.To?.EndTime) {
                                 const startTime = new Date(orderDetails.To.StartTime).toLocaleTimeString('ru-RU', {
@@ -144,14 +132,6 @@ async function checkNewOrders(userId, sessionId) {
                             messageText += `\n`;
                         }
                     }
-
-                    // Добавляем информацию о маршруте
-                    messageText += `📊 Информация о маршруте:\n`;
-                    messageText += `🚚 Номер маршрута: ${routeDetails.Number}\n`;
-                    if (routeDetails.Distance) {
-                        messageText += `📏 Дистанция: ${routeDetails.Distance} км\n`;
-                    }
-                    messageText += `📦 Всего точек в маршруте: ${routeDetails.Points.length - 1}\n`;
 
                     // Отправляем сообщение с учетом ограничения длины
                     if (messageText.length > config.MAX_MESSAGE_LENGTH) {
