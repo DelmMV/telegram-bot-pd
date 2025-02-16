@@ -1,14 +1,19 @@
 const { Markup } = require('telegraf');
 
 const keyboards = {
-    getMainKeyboard: (isMonitoringActive) => {
-        return Markup.keyboard([
-            ['📊 Маршруты', '👤 Профиль'],
-            [isMonitoringActive ? '🔴 Остановить мониторинг' : '🟢 Запустить мониторинг'],
-            ['📝 Создать отчет'],
-            ['🚪 Выйти']
-        ]).resize();
-    },
+  getMainKeyboard: (isMonitoringActive) => {
+          return Markup.keyboard([
+              ['📊 Маршруты', '📈 Общая статистика'],
+              ['👤 Профиль', '📝 Создать отчет'],
+              [isMonitoringActive ? '🔴 Остановить мониторинг' : '🟢 Запустить мониторинг'],
+              ['🚪 Выйти']
+          ]).resize();
+      },
+      
+    getStatisticsKeyboard: Markup.inlineKeyboard([
+            Markup.button.callback('На сегодня', 'stats_today'),
+            Markup.button.callback('Выбрать дату', 'stats_select_date')
+          ]),
 
     getLoginKeyboard: Markup.keyboard([
         ['🔑 Войти'],

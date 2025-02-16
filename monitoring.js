@@ -1,7 +1,14 @@
+const keyboards = require('./keyboards');
+
 class MonitoringService {
     constructor() {
         this.activeMonitoring = new Map();
         this.lastKnownOrders = new Map();
+    }
+
+    shouldStopMonitoring() {
+        const currentHour = new Date().getHours();
+        return currentHour >= 23;
     }
 
     startMonitoring(userId, sessionId, checkFunction, interval) {
@@ -9,7 +16,24 @@ class MonitoringService {
             return false;
         }
 
-        const intervalId = setInterval(() => checkFunction(userId, sessionId), interval);
+        const intervalId = setInterval(async () => {
+            if (this.shouldStopMonitoring()) {
+                this.stopMonitoring(userId);
+                try {
+                    const bot = require('./pd').bot;
+                    await bot.telegram.sendMessage(
+                        userId, 
+                        '🔴 Мониторинг автоматически остановлен (23:00)',
+                        keyboards.getMainKeyboard(false) // Обновляем клавиатуру
+                    );
+                } catch (error) {
+                    console.error('Error sending monitoring stop notification:', error);
+                }
+                return;
+            }
+            checkFunction(userId, sessionId);
+        }, interval);
+
         this.activeMonitoring.set(userId, intervalId);
         return true;
     }
