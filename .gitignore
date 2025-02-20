@@ -3,4 +3,5 @@ node_modules/
 .env
 # macOS
 .DS_Store
+.idea
 sessions.db
