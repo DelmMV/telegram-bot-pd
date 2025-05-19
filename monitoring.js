@@ -23,7 +23,7 @@ class MonitoringService {
                     const bot = require('./pd').bot;
                     await bot.telegram.sendMessage(
                         userId, 
-                        '🔴 Мониторинг автоматически остановлен (23:00)',
+                        '🔴 Мониторинг автоматически остановлен',
                         keyboards.getMainKeyboard(false) // Обновляем клавиатуру
                     );
                 } catch (error) {
