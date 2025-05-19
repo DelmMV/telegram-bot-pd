@@ -108,7 +108,6 @@ async function checkNewOrders(userId, sessionId) {
 
 						if (pointOrder && newOrders.includes(pointOrder.ExternalId)) {
 							const orderDetails = orders.find(o => o.Id === pointOrder.Id)
-
 							messageText += `📦 Заказ: ${pointOrder.ExternalId}\n`
 							messageText += `📍 Адрес: ${point.Address}\n`
 
@@ -274,7 +273,6 @@ async function showRoutes(ctx, date) {
 			}
 
 			const orders = orderDetailsResult.data.TL_Mobile_GetOrdersResponse.Orders
-
 			let messageText = `🚚 Маршрут ${routes.indexOf(route) + 1}\n`
 			messageText += `📝 Номер: ${routeDetails.Number}\n`
 			messageText += `📦 Всего точек: ${routeDetails.Points.length - 1}\n\n`
@@ -664,6 +662,13 @@ bot.command('logout', async ctx => {
 bot.action('routes_today', async ctx => {
 	const currentDate = new Date().toLocaleDateString('ru-RU')
 	await showRoutes(ctx, currentDate)
+})
+
+bot.action('routes_tomorrow', async ctx => {
+	const tomorrow = new Date()
+	tomorrow.setDate(tomorrow.getDate() + 1)
+	const tomorrowDate = tomorrow.toLocaleDateString('ru-RU')
+	await showRoutes(ctx, tomorrowDate)
 })
 
 bot.action('routes_select_date', async ctx => {
