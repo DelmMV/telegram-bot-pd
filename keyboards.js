@@ -22,10 +22,16 @@ const keyboards = {
 	getLoginKeyboard: Markup.keyboard([['🔑 Войти']]).resize(),
 
 	getRoutesKeyboard: Markup.inlineKeyboard([
-		Markup.button.callback('На сегодня', 'routes_today'),
-		Markup.button.callback('На завтра', 'routes_tomorrow'),
-		Markup.button.callback('Активные', 'routes_active'),
-		Markup.button.callback('Выбрать дату', 'routes_select_date'),
+		[Markup.button.callback('На сегодня', 'routes_today')],
+		[Markup.button.callback('На завтра', 'routes_tomorrow')],
+		[Markup.button.callback('Активные', 'routes_active')],
+		[Markup.button.callback('Выбрать дату', 'routes_select_date')],
+	]),
+
+	getReportKeyboard: Markup.inlineKeyboard([
+		[Markup.button.callback('8:30-21:00', 'report_time_8_30_21')],
+		[Markup.button.callback('9:00-21:00', 'report_time_9_21')],
+		[Markup.button.callback('Другое время', 'report_custom_time')],
 	]),
 }
 

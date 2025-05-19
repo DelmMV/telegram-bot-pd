@@ -1068,7 +1068,10 @@ bot.on('text', async ctx => {
 			if (!session?.session_id) {
 				return await ctx.reply('Вы не авторизованы', keyboards.getLoginKeyboard)
 			}
-			await ctx.reply('Введите время работы в формате "9.30-21.00":')
+			await ctx.reply(
+				'Выберите время работы или введите вручную в формате "9.30-21.00":',
+				keyboards.getReportKeyboard
+			)
 			await db.saveSession(userId, {
 				...session,
 				step: config.STEPS.AWAITING_WORK_TIME,
@@ -1228,6 +1231,84 @@ bot.on('text', async ctx => {
 			keyboards.getLoginKeyboard
 		)
 	}
+})
+
+// Обработчики инлайн кнопок для отчетов
+bot.action('report_time_8_30_21', async ctx => {
+	const userId = ctx.from.id
+	const session = await db.getSession(userId)
+	if (!session?.session_id) {
+		return await ctx.reply('Вы не авторизованы', keyboards.getLoginKeyboard)
+	}
+
+	const timeText = '8.30-21.00'
+	try {
+		const currentDate = new Date().toLocaleDateString('ru-RU')
+		const workHours = calculateWorkHours(timeText)
+		const driverSurname = getDriverSurname(session.driver_name)
+
+		const reportMessage =
+			`📋 ${currentDate}\n` +
+			`👤 ${driverSurname}\n` +
+			`🕒 ${timeText} (${workHours.toFixed(1)} ч.)`
+
+		await ctx.reply(
+			reportMessage,
+			keyboards.getMainKeyboard(monitoring.isMonitoringActive(userId))
+		)
+
+		await db.saveSession(userId, {
+			...session,
+			step: config.STEPS.AUTHENTICATED,
+		})
+	} catch (error) {
+		console.error('Error creating report:', error)
+		await ctx.reply('❌ Произошла ошибка при создании отчета')
+	}
+})
+
+bot.action('report_time_9_21', async ctx => {
+	const userId = ctx.from.id
+	const session = await db.getSession(userId)
+	if (!session?.session_id) {
+		return await ctx.reply('Вы не авторизованы', keyboards.getLoginKeyboard)
+	}
+
+	const timeText = '9.00-21.00'
+	try {
+		const currentDate = new Date().toLocaleDateString('ru-RU')
+		const workHours = calculateWorkHours(timeText)
+		const driverSurname = getDriverSurname(session.driver_name)
+
+		const reportMessage =
+			`📋 ${currentDate}\n` +
+			`👤 ${driverSurname}\n` +
+			`🕒 ${timeText} (${workHours.toFixed(1)} ч.)`
+
+		await ctx.reply(
+			reportMessage,
+			keyboards.getMainKeyboard(monitoring.isMonitoringActive(userId))
+		)
+
+		await db.saveSession(userId, {
+			...session,
+			step: config.STEPS.AUTHENTICATED,
+		})
+	} catch (error) {
+		console.error('Error creating report:', error)
+		await ctx.reply('❌ Произошла ошибка при создании отчета')
+	}
+})
+
+bot.action('report_custom_time', async ctx => {
+	const userId = ctx.from.id
+	const session = await db.getSession(userId)
+	if (!session?.session_id) {
+		return await ctx.reply('Вы не авторизованы', keyboards.getLoginKeyboard)
+	}
+
+	await ctx.reply('Введите время работы в формате "9.30-21.00":')
+	// Session step already set to AWAITING_WORK_TIME in the main handler
 })
 
 bot.launch()
