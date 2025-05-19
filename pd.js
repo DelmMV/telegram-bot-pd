@@ -109,7 +109,11 @@ async function checkNewOrders(userId, sessionId) {
 						if (pointOrder && newOrders.includes(pointOrder.ExternalId)) {
 							const orderDetails = orders.find(o => o.Id === pointOrder.Id)
 							messageText += `📦 Заказ: ${pointOrder.ExternalId}\n`
-							messageText += `📍 Адрес: ${point.Address}\n`
+
+							// Создаем кликабельную ссылку на карту с адресом
+							const encodedAddress = encodeURIComponent(point.Address)
+							messageText += `📮 Адрес: <a href="https://yandex.ru/maps/?text=${encodedAddress}">${point.Address}</a>\n`
+							messageText += `🧭 <a href="yandexnavi://map_search?text=${encodedAddress}">Открыть в навигаторе</a>\n`
 
 							if (point.Description) {
 								messageText += `👤 Получатель: ${point.Description}\n`
@@ -161,11 +165,18 @@ async function checkNewOrders(userId, sessionId) {
 						) {
 							await bot.telegram.sendMessage(
 								userId,
-								messageText.slice(i, i + config.MAX_MESSAGE_LENGTH)
+								messageText.slice(i, i + config.MAX_MESSAGE_LENGTH),
+								{
+									parse_mode: 'HTML',
+									disable_web_page_preview: true,
+								}
 							)
 						}
 					} else {
-						await bot.telegram.sendMessage(userId, messageText)
+						await bot.telegram.sendMessage(userId, messageText, {
+							parse_mode: 'HTML',
+							disable_web_page_preview: true,
+						})
 					}
 				}
 			}
@@ -289,7 +300,10 @@ async function showRoutes(ctx, date) {
 					messageText += `🔹 Заказ: ${point.Orders[0].ExternalId}\n`
 				}
 
-				messageText += `📮 Адрес: ${point.Address}\n`
+				// Создаем кликабельную ссылку на карту с адресом
+				const encodedAddress = encodeURIComponent(point.Address)
+				messageText += `📮 Адрес: <a href="https://yandex.ru/maps/?text=${encodedAddress}">${point.Address}</a>\n`
+				messageText += `🧭 <a href="yandexnavi://map_search?text=${encodedAddress}">Открыть в навигаторе</a>\n`
 
 				if (point.Description) {
 					messageText += `👤 Получатель: ${point.Description}\n`
@@ -347,10 +361,16 @@ async function showRoutes(ctx, date) {
 					i < messageText.length;
 					i += config.MAX_MESSAGE_LENGTH
 				) {
-					await ctx.reply(messageText.slice(i, i + config.MAX_MESSAGE_LENGTH))
+					await ctx.reply(messageText.slice(i, i + config.MAX_MESSAGE_LENGTH), {
+						parse_mode: 'HTML',
+						disable_web_page_preview: true,
+					})
 				}
 			} else {
-				await ctx.reply(messageText)
+				await ctx.reply(messageText, {
+					parse_mode: 'HTML',
+					disable_web_page_preview: true,
+				})
 			}
 		}
 	} catch (error) {
@@ -502,7 +522,10 @@ async function showActiveRoutes(ctx, date) {
 					messageText += `🔹 Заказ: ${point.Orders[0].ExternalId}\n`
 				}
 
-				messageText += `📮 Адрес: ${point.Address}\n`
+				// Создаем кликабельную ссылку на карту с адресом
+				const encodedAddress = encodeURIComponent(point.Address)
+				messageText += `📮 Адрес: <a href="https://yandex.ru/maps/?text=${encodedAddress}">${point.Address}</a>\n`
+				messageText += `🧭 <a href="yandexnavi://map_search?text=${encodedAddress}">Открыть в навигаторе</a>\n`
 
 				if (point.Description) {
 					messageText += `👤 Получатель: ${point.Description}\n`
@@ -558,10 +581,16 @@ async function showActiveRoutes(ctx, date) {
 					i < messageText.length;
 					i += config.MAX_MESSAGE_LENGTH
 				) {
-					await ctx.reply(messageText.slice(i, i + config.MAX_MESSAGE_LENGTH))
+					await ctx.reply(messageText.slice(i, i + config.MAX_MESSAGE_LENGTH), {
+						parse_mode: 'HTML',
+						disable_web_page_preview: true,
+					})
 				}
 			} else {
-				await ctx.reply(messageText)
+				await ctx.reply(messageText, {
+					parse_mode: 'HTML',
+					disable_web_page_preview: true,
+				})
 			}
 		}
 
