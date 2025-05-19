@@ -24,6 +24,7 @@ const keyboards = {
 	getRoutesKeyboard: Markup.inlineKeyboard([
 		Markup.button.callback('На сегодня', 'routes_today'),
 		Markup.button.callback('На завтра', 'routes_tomorrow'),
+		Markup.button.callback('Активные', 'routes_active'),
 		Markup.button.callback('Выбрать дату', 'routes_select_date'),
 	]),
 }

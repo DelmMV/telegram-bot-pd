@@ -381,6 +381,224 @@ async function showRoutes(ctx, date) {
 	}
 }
 
+async function showActiveRoutes(ctx, date) {
+	try {
+		const session = await db.getSession(ctx.from.id)
+		if (!session?.session_id) {
+			return await ctx.reply('Вы не авторизованы', keyboards.getLoginKeyboard)
+		}
+
+		const credentials = {
+			clientCode: session.client_code,
+			login: session.login,
+			password: session.password,
+		}
+
+		const result = await api.getRoutes(session.session_id, date, credentials)
+
+		if (result.sessionUpdated) {
+			session.session_id = result.newSessionId
+			await db.saveSession(ctx.from.id, session)
+		}
+
+		const response = result.data
+
+		if (!response?.TL_Mobile_EnumRoutesResponse?.Routes) {
+			return await ctx.reply(
+				`📭 Активных маршрутов на ${date} не найдено`,
+				keyboards.getMainKeyboard(monitoring.isMonitoringActive(ctx.from.id))
+			)
+		}
+
+		const routes = response.TL_Mobile_EnumRoutesResponse.Routes
+		const totalOrders = routes.reduce((sum, route) => {
+			if (route.Orders && Array.isArray(route.Orders)) {
+				return sum + route.Orders.length
+			}
+			return sum
+		}, 0)
+
+		if (totalOrders === 0) {
+			return await ctx.reply(
+				`📭 На ${date} активных заказов нет`,
+				keyboards.getMainKeyboard(monitoring.isMonitoringActive(ctx.from.id))
+			)
+		}
+
+		// Идентификаторы статусов "Выполнен"
+		const completedStatuses = [
+			'b107b2e5-fe96-46ec-9c1d-7248d77e8383', // Выполнен (сайт)
+			'ceb8edd8-a0d9-4116-a8ee-a6c0be89103b', // Выполнен (нал)
+			'd4535403-e4f6-4888-859e-098b7829b3a6', // Выполнен (безнал)
+		]
+
+		let activeRoutesFound = false
+
+		for (const route of routes) {
+			const detailsResult = await api.getRouteDetails(
+				session.session_id,
+				[route.Id],
+				credentials
+			)
+
+			if (detailsResult.sessionUpdated) {
+				session.session_id = detailsResult.newSessionId
+				await db.saveSession(ctx.from.id, session)
+			}
+
+			const routeDetails =
+				detailsResult.data.TL_Mobile_GetRoutesResponse.Routes[0]
+			const orderIds = routeDetails.Points.flatMap(
+				point => point.Orders?.map(order => order.Id) || []
+			).filter(id => id)
+
+			const orderDetailsResult = await api.getOrderDetails(
+				session.session_id,
+				orderIds,
+				credentials
+			)
+			if (orderDetailsResult.sessionUpdated) {
+				session.session_id = orderDetailsResult.newSessionId
+				await db.saveSession(ctx.from.id, session)
+			}
+
+			const orders = orderDetailsResult.data.TL_Mobile_GetOrdersResponse.Orders
+
+			// Проверяем, есть ли в маршруте активные заказы
+			const activeOrders = orders.filter(
+				order => !completedStatuses.includes(order.CustomState)
+			)
+
+			if (activeOrders.length === 0) {
+				continue // Пропускаем маршрут, если нет активных заказов
+			}
+
+			activeRoutesFound = true
+			let messageText = `🚚 Активный маршрут ${routes.indexOf(route) + 1}\n`
+			messageText += `📝 Номер: ${routeDetails.Number}\n`
+			messageText += `📦 Всего активных точек: ${activeOrders.length}\n\n`
+
+			for (let i = 1; i < routeDetails.Points.length; i++) {
+				const point = routeDetails.Points[i]
+				if (!point.Orders || point.Orders.length === 0) continue
+
+				const orderDetails = orders.find(o => o.Id === point.Orders[0].Id)
+
+				// Пропускаем точки с выполненными заказами
+				if (
+					orderDetails &&
+					completedStatuses.includes(orderDetails.CustomState)
+				) {
+					continue
+				}
+
+				messageText += `📍 Точка ${point.Label}:\n`
+
+				if (
+					point.Orders &&
+					point.Orders.length > 0 &&
+					point.Orders[0].ExternalId
+				) {
+					messageText += `🔹 Заказ: ${point.Orders[0].ExternalId}\n`
+				}
+
+				messageText += `📮 Адрес: ${point.Address}\n`
+
+				if (point.Description) {
+					messageText += `👤 Получатель: ${point.Description}\n`
+				}
+
+				if (point.Orders && point.Orders.length > 0) {
+					if (point.Weight) {
+						messageText += `⚖️ Вес: ${point.Weight} ${routeDetails.WeightUnit}\n`
+					}
+
+					if (orderDetails) {
+						if (orderDetails.CustomState) {
+							messageText += `📊 Статус: ${getOrderStatusName(
+								orderDetails.CustomState
+							)}\n`
+						}
+
+						if (orderDetails.InvoiceTotal) {
+							messageText += `💰 Стоимость: ${orderDetails.InvoiceTotal} руб.\n`
+						}
+
+						if (orderDetails.Comment) {
+							messageText += `📝 Комментарий: ${orderDetails.Comment}\n`
+						}
+
+						if (orderDetails.To?.ContactPhone) {
+							messageText += `📱 Телефон: ${orderDetails.To.ContactPhone}\n`
+						}
+
+						if (orderDetails.To?.StartTime && orderDetails.To?.EndTime) {
+							const startTime = new Date(
+								orderDetails.To.StartTime
+							).toLocaleTimeString('ru-RU', {
+								hour: '2-digit',
+								minute: '2-digit',
+							})
+							const endTime = new Date(
+								orderDetails.To.EndTime
+							).toLocaleTimeString('ru-RU', {
+								hour: '2-digit',
+								minute: '2-digit',
+							})
+							messageText += `⏰ Временное окно: ${startTime} - ${endTime}\n`
+						}
+					}
+				}
+				messageText += `\n`
+			}
+
+			if (messageText.length > config.MAX_MESSAGE_LENGTH) {
+				for (
+					let i = 0;
+					i < messageText.length;
+					i += config.MAX_MESSAGE_LENGTH
+				) {
+					await ctx.reply(messageText.slice(i, i + config.MAX_MESSAGE_LENGTH))
+				}
+			} else {
+				await ctx.reply(messageText)
+			}
+		}
+
+		if (!activeRoutesFound) {
+			await ctx.reply(
+				`📭 На ${date} нет активных заказов`,
+				keyboards.getMainKeyboard(monitoring.isMonitoringActive(ctx.from.id))
+			)
+		}
+	} catch (error) {
+		console.error('Error showing active routes:', error)
+
+		if (error.isSessionExpired) {
+			const session = await db.getSession(ctx.from.id)
+			const credentials = {
+				clientCode: session.client_code,
+				login: session.login,
+				password: session.password,
+			}
+
+			try {
+				const authResponse = await api.refreshSession(credentials)
+				session.session_id = authResponse
+				await db.saveSession(ctx.from.id, session)
+				await showActiveRoutes(ctx, date)
+			} catch (refreshError) {
+				console.error('Session refresh error:', refreshError)
+				await ctx.reply(
+					'Ошибка обновления сессии. Пожалуйста, авторизуйтесь заново через /start'
+				)
+			}
+		} else {
+			await ctx.reply('❌ Произошла ошибка при получении активных маршрутов')
+		}
+	}
+}
+
 async function showStatistics(ctx, date) {
 	try {
 		const session = await db.getSession(ctx.from.id)
@@ -669,6 +887,11 @@ bot.action('routes_tomorrow', async ctx => {
 	tomorrow.setDate(tomorrow.getDate() + 1)
 	const tomorrowDate = tomorrow.toLocaleDateString('ru-RU')
 	await showRoutes(ctx, tomorrowDate)
+})
+
+bot.action('routes_active', async ctx => {
+	const currentDate = new Date().toLocaleDateString('ru-RU')
+	await showActiveRoutes(ctx, currentDate)
 })
 
 bot.action('routes_select_date', async ctx => {
