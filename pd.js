@@ -772,7 +772,7 @@ async function showStatistics(ctx, date) {
 
 		// Отправляем детальную информацию по заказам
 		if (orderDetails.length > 0) {
-			let detailedMessage = `📋 Детали заказов:\n\n`
+			let detailedMessage = ''
 			orderDetails.forEach(order => {
 				detailedMessage += `${order.externalId} ${order.paymentType}\n`
 			})
