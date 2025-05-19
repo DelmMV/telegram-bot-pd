@@ -158,19 +158,52 @@ async function checkNewOrders(userId, sessionId) {
 
 					// Отправляем сообщение с учетом ограничения длины
 					if (messageText.length > config.MAX_MESSAGE_LENGTH) {
-						for (
-							let i = 0;
-							i < messageText.length;
-							i += config.MAX_MESSAGE_LENGTH
-						) {
+						// Модифицированный алгоритм разбиения сообщения, чтобы не разрывать HTML-теги
+						let position = 0
+						while (position < messageText.length) {
+							let endPosition = position + config.MAX_MESSAGE_LENGTH
+
+							// Если мы не в конце сообщения, найдем безопасную точку для разрыва
+							if (endPosition < messageText.length) {
+								// Ищем последний перевод строки перед лимитом
+								const lastNewLine = messageText.lastIndexOf('\n', endPosition)
+								if (lastNewLine > position) {
+									endPosition = lastNewLine + 1 // +1 чтобы включить символ переноса строки
+								} else {
+									// Если нет переноса строки, убедимся что не разрываем HTML-тег
+									let openTagIndex = messageText.lastIndexOf(
+										'<a href=',
+										endPosition
+									)
+									let closeTagIndex = messageText.lastIndexOf(
+										'</a>',
+										endPosition
+									)
+
+									// Если открывающий тег находится перед закрывающим, значит тег не закрыт
+									if (openTagIndex > closeTagIndex) {
+										// Найдем предыдущий перенос строки перед открывающим тегом
+										const safeBreak = messageText.lastIndexOf(
+											'\n',
+											openTagIndex
+										)
+										if (safeBreak > position) {
+											endPosition = safeBreak + 1
+										}
+									}
+								}
+							}
+
 							await bot.telegram.sendMessage(
 								userId,
-								messageText.slice(i, i + config.MAX_MESSAGE_LENGTH),
+								messageText.slice(position, endPosition),
 								{
 									parse_mode: 'HTML',
 									disable_web_page_preview: true,
 								}
 							)
+
+							position = endPosition
 						}
 					} else {
 						await bot.telegram.sendMessage(userId, messageText, {
@@ -355,16 +388,44 @@ async function showRoutes(ctx, date) {
 				messageText += `\n`
 			}
 
+			// Отправляем сообщение с учетом ограничения длины
 			if (messageText.length > config.MAX_MESSAGE_LENGTH) {
-				for (
-					let i = 0;
-					i < messageText.length;
-					i += config.MAX_MESSAGE_LENGTH
-				) {
-					await ctx.reply(messageText.slice(i, i + config.MAX_MESSAGE_LENGTH), {
+				// Модифицированный алгоритм разбиения сообщения, чтобы не разрывать HTML-теги
+				let position = 0
+				while (position < messageText.length) {
+					let endPosition = position + config.MAX_MESSAGE_LENGTH
+
+					// Если мы не в конце сообщения, найдем безопасную точку для разрыва
+					if (endPosition < messageText.length) {
+						// Ищем последний перевод строки перед лимитом
+						const lastNewLine = messageText.lastIndexOf('\n', endPosition)
+						if (lastNewLine > position) {
+							endPosition = lastNewLine + 1 // +1 чтобы включить символ переноса строки
+						} else {
+							// Если нет переноса строки, убедимся что не разрываем HTML-тег
+							let openTagIndex = messageText.lastIndexOf(
+								'<a href=',
+								endPosition
+							)
+							let closeTagIndex = messageText.lastIndexOf('</a>', endPosition)
+
+							// Если открывающий тег находится перед закрывающим, значит тег не закрыт
+							if (openTagIndex > closeTagIndex) {
+								// Найдем предыдущий перенос строки перед открывающим тегом
+								const safeBreak = messageText.lastIndexOf('\n', openTagIndex)
+								if (safeBreak > position) {
+									endPosition = safeBreak + 1
+								}
+							}
+						}
+					}
+
+					await ctx.reply(messageText.slice(position, endPosition), {
 						parse_mode: 'HTML',
 						disable_web_page_preview: true,
 					})
+
+					position = endPosition
 				}
 			} else {
 				await ctx.reply(messageText, {
@@ -575,16 +636,44 @@ async function showActiveRoutes(ctx, date) {
 				messageText += `\n`
 			}
 
+			// Отправляем сообщение с учетом ограничения длины
 			if (messageText.length > config.MAX_MESSAGE_LENGTH) {
-				for (
-					let i = 0;
-					i < messageText.length;
-					i += config.MAX_MESSAGE_LENGTH
-				) {
-					await ctx.reply(messageText.slice(i, i + config.MAX_MESSAGE_LENGTH), {
+				// Модифицированный алгоритм разбиения сообщения, чтобы не разрывать HTML-теги
+				let position = 0
+				while (position < messageText.length) {
+					let endPosition = position + config.MAX_MESSAGE_LENGTH
+
+					// Если мы не в конце сообщения, найдем безопасную точку для разрыва
+					if (endPosition < messageText.length) {
+						// Ищем последний перевод строки перед лимитом
+						const lastNewLine = messageText.lastIndexOf('\n', endPosition)
+						if (lastNewLine > position) {
+							endPosition = lastNewLine + 1 // +1 чтобы включить символ переноса строки
+						} else {
+							// Если нет переноса строки, убедимся что не разрываем HTML-тег
+							let openTagIndex = messageText.lastIndexOf(
+								'<a href=',
+								endPosition
+							)
+							let closeTagIndex = messageText.lastIndexOf('</a>', endPosition)
+
+							// Если открывающий тег находится перед закрывающим, значит тег не закрыт
+							if (openTagIndex > closeTagIndex) {
+								// Найдем предыдущий перенос строки перед открывающим тегом
+								const safeBreak = messageText.lastIndexOf('\n', openTagIndex)
+								if (safeBreak > position) {
+									endPosition = safeBreak + 1
+								}
+							}
+						}
+					}
+
+					await ctx.reply(messageText.slice(position, endPosition), {
 						parse_mode: 'HTML',
 						disable_web_page_preview: true,
 					})
+
+					position = endPosition
 				}
 			} else {
 				await ctx.reply(messageText, {
@@ -779,14 +868,45 @@ async function showStatistics(ctx, date) {
 
 			// Разбиваем на части, если сообщение слишком длинное
 			if (detailedMessage.length > config.MAX_MESSAGE_LENGTH) {
-				for (
-					let i = 0;
-					i < detailedMessage.length;
-					i += config.MAX_MESSAGE_LENGTH
-				) {
-					await ctx.reply(
-						detailedMessage.slice(i, i + config.MAX_MESSAGE_LENGTH)
-					)
+				// Модифицированный алгоритм разбиения сообщения, чтобы не разрывать HTML-теги
+				let position = 0
+				while (position < detailedMessage.length) {
+					let endPosition = position + config.MAX_MESSAGE_LENGTH
+
+					// Если мы не в конце сообщения, найдем безопасную точку для разрыва
+					if (endPosition < detailedMessage.length) {
+						// Ищем последний перевод строки перед лимитом
+						const lastNewLine = detailedMessage.lastIndexOf('\n', endPosition)
+						if (lastNewLine > position) {
+							endPosition = lastNewLine + 1 // +1 чтобы включить символ переноса строки
+						} else {
+							// Если нет переноса строки, убедимся что не разрываем HTML-тег
+							let openTagIndex = detailedMessage.lastIndexOf(
+								'<a href=',
+								endPosition
+							)
+							let closeTagIndex = detailedMessage.lastIndexOf(
+								'</a>',
+								endPosition
+							)
+
+							// Если открывающий тег находится перед закрывающим, значит тег не закрыт
+							if (openTagIndex > closeTagIndex) {
+								// Найдем предыдущий перенос строки перед открывающим тегом
+								const safeBreak = detailedMessage.lastIndexOf(
+									'\n',
+									openTagIndex
+								)
+								if (safeBreak > position) {
+									endPosition = safeBreak + 1
+								}
+							}
+						}
+					}
+
+					await ctx.reply(detailedMessage.slice(position, endPosition))
+
+					position = endPosition
 				}
 			} else {
 				await ctx.reply(detailedMessage)
