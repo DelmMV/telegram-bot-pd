@@ -298,26 +298,38 @@ async function calculateRouteEarnings(points) {
       // Рассчитываем для каждой точки, передавая точку старта
       const earnings = await calculatePointEarnings(point, startPoint);
 
-      if (!earnings.error) {
-        // Получаем количество заказов в точке
-        const ordersCount = point.Orders?.length || 1;
+      // Получаем количество заказов в точке
+      const ordersCount = point.Orders?.length || 1;
 
-        // Заработок = базовая стоимость × количество заказов
-        const pointEarnings = earnings.price * ordersCount;
+      // Если не удалось рассчитать расстояние, используем минимальный тариф
+      let price = earnings.price;
+      let distance = earnings.distance;
 
-        totalDistance += earnings.distance;
-        totalEarnings += pointEarnings;
-
-        pointsDetails.push({
-          index: i,
-          address: point.Address,
-          distance: earnings.distance,
-          pricePerOrder: earnings.price,
-          ordersCount: ordersCount,
-          totalPrice: pointEarnings,
-          coordinates: earnings.coordinates,
-        });
+      if (earnings.error) {
+        // Используем минимальный тариф из конфигурации
+        price = config.TARIFFS[0].price; // 180 руб
+        distance = 0;
+        console.log(
+          `Cannot calculate distance for point ${i} (${point.Address}), using minimum tariff: ${price} rub`,
+        );
       }
+
+      // Заработок = базовая стоимость × количество заказов
+      const pointEarnings = price * ordersCount;
+
+      totalDistance += distance;
+      totalEarnings += pointEarnings;
+
+      pointsDetails.push({
+        index: i,
+        address: point.Address,
+        distance: distance,
+        pricePerOrder: price,
+        ordersCount: ordersCount,
+        totalPrice: pointEarnings,
+        coordinates: earnings.coordinates,
+        error: earnings.error || null,
+      });
 
       // Задержка между запросами (учитывая геокодирование)
       await new Promise((resolve) => setTimeout(resolve, 1200));

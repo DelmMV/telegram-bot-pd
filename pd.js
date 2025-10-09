@@ -788,10 +788,21 @@ async function showStatistics(ctx, date) {
         if (!routeEarnings.error) {
           totalDistance += routeEarnings.totalDistance;
           totalEarnings += routeEarnings.totalEarnings;
+
+          console.log(
+            `Route ${route.Id}: ${routeEarnings.pointsCount} points, ` +
+              `distance: ${routeEarnings.totalDistance.toFixed(2)} km, ` +
+              `earnings: ${routeEarnings.totalEarnings.toFixed(2)} rub`,
+          );
+        } else {
+          console.error(
+            `Error calculating earnings for route ${route.Id}:`,
+            routeEarnings.error,
+          );
         }
       } catch (error) {
         console.error(
-          `Error calculating earnings for route ${route.Id}:`,
+          `Exception calculating earnings for route ${route.Id}:`,
           error,
         );
       }
@@ -1740,19 +1751,6 @@ bot.action("monthly_stats_back", async (ctx) => {
     "Выберите период для статистики:",
     keyboards.getMonthlyStatsKeyboard,
   );
-});
-
-// Обработчик ошибок для бота Telegraf
-bot.catch((err, ctx) => {
-  console.error("Unhandled error while processing", ctx.update);
-  console.error("Error:", err);
-
-  // Пытаемся отправить сообщение об ошибке пользователю
-  if (ctx?.reply) {
-    ctx
-      .reply("❌ Произошла ошибка при обработке запроса. Попробуйте позже.")
-      .catch((e) => console.error("Failed to send error message:", e));
-  }
 });
 
 bot.launch();
