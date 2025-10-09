@@ -154,12 +154,18 @@ async function calculateRoadDistance(fromCoords, toCoords) {
     // Проверяем кэш
     const cacheKey = getCacheKey(fromCoords, toCoords);
     if (distanceCache.has(cacheKey)) {
-      return distanceCache.get(cacheKey);
+      const cachedDistance = distanceCache.get(cacheKey);
+      console.log(
+        `    → Using cached distance: ${cachedDistance.toFixed(2)} km`,
+      );
+      return cachedDistance;
     }
 
     // Формируем URL для OSRM API
     // Формат: /route/v1/driving/{lon1},{lat1};{lon2},{lat2}
     const url = `${config.ROUTING_API.url}/${fromCoords.lon},${fromCoords.lat};${toCoords.lon},${toCoords.lat}`;
+
+    console.log(`    → OSRM request: ${url}`);
 
     const response = await axios.get(url, {
       timeout: config.ROUTING_API.timeout,
@@ -181,17 +187,25 @@ async function calculateRoadDistance(fromCoords, toCoords) {
       // Сохраняем в кэш
       distanceCache.set(cacheKey, distanceKm);
 
+      console.log(`    ✓ OSRM distance: ${distanceKm.toFixed(2)} km`);
       return distanceKm;
     }
 
     // Если не удалось получить маршрут, используем прямое расстояние
-    console.warn("OSRM API не вернул маршрут, используем прямое расстояние");
-    return calculateStraightDistance(fromCoords, toCoords);
+    const straightDistance = calculateStraightDistance(fromCoords, toCoords);
+    console.warn(
+      `    ⚠ OSRM API не вернул маршрут, прямое расстояние: ${straightDistance.toFixed(2)} km`,
+    );
+    return straightDistance;
   } catch (error) {
-    console.error("Error calculating road distance:", error.message);
+    const straightDistance = calculateStraightDistance(fromCoords, toCoords);
+    console.error(`    ✗ OSRM error: ${error.message}`);
+    console.log(
+      `    → Using straight distance: ${straightDistance.toFixed(2)} km`,
+    );
 
     // В случае ошибки используем прямое расстояние
-    return calculateStraightDistance(fromCoords, toCoords);
+    return straightDistance;
   }
 }
 
@@ -256,12 +270,29 @@ function calculateDeliveryPrice(distanceKm) {
 async function calculatePointEarnings(deliveryPoint, startPoint = null) {
   try {
     const start = startPoint || config.START_POINT;
+    const addressStr =
+      typeof deliveryPoint.Address === "string"
+        ? deliveryPoint.Address
+        : deliveryPoint.Address?.Raw ||
+          deliveryPoint.Address?.OriginalRaw ||
+          "Unknown";
+
+    console.log(`  Calculating earnings for: ${addressStr}`);
 
     // Извлекаем координаты точки доставки (теперь с await!)
     const deliveryCoords = await extractCoordinates(deliveryPoint);
 
     if (!deliveryCoords) {
-      // Убрана длинная строка в консоль
+      console.log(`  ✗ NO_COORDINATES for: ${addressStr}`);
+      console.log(
+        `    Point structure:`,
+        JSON.stringify({
+          hasLat: !!deliveryPoint.Lat,
+          hasLon: !!deliveryPoint.Lon,
+          hasAddress: !!deliveryPoint.Address,
+          addressType: typeof deliveryPoint.Address,
+        }),
+      );
       return {
         distance: 0,
         price: 0,
@@ -270,11 +301,18 @@ async function calculatePointEarnings(deliveryPoint, startPoint = null) {
       };
     }
 
+    console.log(
+      `  ✓ Coordinates found: [${deliveryCoords.lat}, ${deliveryCoords.lon}]`,
+    );
+    console.log(`    Start point: [${start.lat}, ${start.lon}]`);
+
     // Рассчитываем расстояние по дорогам
     const distance = await calculateRoadDistance(start, deliveryCoords);
 
     // Определяем стоимость
     const price = calculateDeliveryPrice(distance);
+
+    console.log(`  ✓ Distance: ${distance.toFixed(2)} km, Price: ${price} rub`);
 
     return {
       distance: Math.round(distance * 100) / 100, // Округляем до 2 знаков
@@ -282,7 +320,17 @@ async function calculatePointEarnings(deliveryPoint, startPoint = null) {
       coordinates: deliveryCoords,
     };
   } catch (error) {
-    console.error("Error calculating point earnings:", error);
+    const addressStr =
+      typeof deliveryPoint.Address === "string"
+        ? deliveryPoint.Address
+        : deliveryPoint.Address?.Raw ||
+          deliveryPoint.Address?.OriginalRaw ||
+          "Unknown";
+    console.error(
+      `  ✗ Exception in calculatePointEarnings for ${addressStr}:`,
+      error.message,
+    );
+    console.error(`    Stack:`, error.stack);
     return {
       distance: 0,
       price: 0,
