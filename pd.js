@@ -1464,6 +1464,7 @@ bot.action("report_custom_time", async (ctx) => {
 bot.action("monthly_stats_current", async (ctx) => {
   await ctx.answerCbQuery();
   const userId = ctx.from.id;
+  const chatId = ctx.chat.id;
   const session = await db.getSession(userId);
 
   if (!session?.session_id) {
@@ -1474,54 +1475,65 @@ bot.action("monthly_stats_current", async (ctx) => {
   const month = now.getMonth() + 1;
   const year = now.getFullYear();
 
-  try {
-    await ctx.reply(
-      "⏳ Собираю статистику за текущий месяц...\nЭто может занять несколько минут.",
-    );
+  // Отправляем начальное сообщение и запускаем сбор статистики в фоне
+  await ctx.reply(
+    "⏳ Собираю статистику за текущий месяц...\nЭто может занять несколько минут.\n\n" +
+      "Вы можете продолжить работу с ботом, результат будет отправлен автоматически.",
+  );
 
+  // Запускаем асинхронную обработку без блокировки callback
+  setImmediate(async () => {
     let progressMessage;
-    const stats = await monthlyStats.collectMonthlyStatistics(
-      userId,
-      month,
-      year,
-      async (processed, total) => {
-        if (processed % 5 === 0 || processed === total) {
-          const progressText = `📊 Обработано дней: ${processed}/${total}`;
-          if (progressMessage) {
-            try {
-              await ctx.telegram.editMessageText(
-                ctx.chat.id,
-                progressMessage.message_id,
-                null,
+    try {
+      const stats = await monthlyStats.collectMonthlyStatistics(
+        userId,
+        month,
+        year,
+        async (processed, total) => {
+          if (processed % 5 === 0 || processed === total) {
+            const progressText = `📊 Обработано дней: ${processed}/${total}`;
+            if (progressMessage) {
+              try {
+                await bot.telegram.editMessageText(
+                  chatId,
+                  progressMessage.message_id,
+                  null,
+                  progressText,
+                );
+              } catch (error) {
+                // Игнорируем ошибки редактирования
+              }
+            } else {
+              progressMessage = await bot.telegram.sendMessage(
+                chatId,
                 progressText,
               );
-            } catch (error) {
-              // Игнорируем ошибки редактирования
             }
-          } else {
-            progressMessage = await ctx.reply(progressText);
           }
-        }
-      },
-    );
+        },
+      );
 
-    const message = monthlyStats.formatMonthlyStats(stats, month, year);
-    await ctx.reply(
-      message,
-      keyboards.getMainKeyboard(monitoring.isMonitoringActive(userId)),
-    );
-  } catch (error) {
-    console.error("Error getting monthly statistics:", error);
-    await ctx.reply(
-      "❌ Ошибка при сборе статистики",
-      keyboards.getMainKeyboard(monitoring.isMonitoringActive(userId)),
-    );
-  }
+      const message = monthlyStats.formatMonthlyStats(stats, month, year);
+      await bot.telegram.sendMessage(
+        chatId,
+        message,
+        keyboards.getMainKeyboard(monitoring.isMonitoringActive(userId)),
+      );
+    } catch (error) {
+      console.error("Error getting monthly statistics:", error);
+      await bot.telegram.sendMessage(
+        chatId,
+        "❌ Ошибка при сборе статистики",
+        keyboards.getMainKeyboard(monitoring.isMonitoringActive(userId)),
+      );
+    }
+  });
 });
 
 bot.action("monthly_stats_previous", async (ctx) => {
   await ctx.answerCbQuery();
   const userId = ctx.from.id;
+  const chatId = ctx.chat.id;
   const session = await db.getSession(userId);
 
   if (!session?.session_id) {
@@ -1533,49 +1545,59 @@ bot.action("monthly_stats_previous", async (ctx) => {
   const month = now.getMonth() + 1;
   const year = now.getFullYear();
 
-  try {
-    await ctx.reply(
-      "⏳ Собираю статистику за прошлый месяц...\nЭто может занять несколько минут.",
-    );
+  // Отправляем начальное сообщение и запускаем сбор статистики в фоне
+  await ctx.reply(
+    "⏳ Собираю статистику за прошлый месяц...\nЭто может занять несколько минут.\n\n" +
+      "Вы можете продолжить работу с ботом, результат будет отправлен автоматически.",
+  );
 
+  // Запускаем асинхронную обработку без блокировки callback
+  setImmediate(async () => {
     let progressMessage;
-    const stats = await monthlyStats.collectMonthlyStatistics(
-      userId,
-      month,
-      year,
-      async (processed, total) => {
-        if (processed % 5 === 0 || processed === total) {
-          const progressText = `📊 Обработано дней: ${processed}/${total}`;
-          if (progressMessage) {
-            try {
-              await ctx.telegram.editMessageText(
-                ctx.chat.id,
-                progressMessage.message_id,
-                null,
+    try {
+      const stats = await monthlyStats.collectMonthlyStatistics(
+        userId,
+        month,
+        year,
+        async (processed, total) => {
+          if (processed % 5 === 0 || processed === total) {
+            const progressText = `📊 Обработано дней: ${processed}/${total}`;
+            if (progressMessage) {
+              try {
+                await bot.telegram.editMessageText(
+                  chatId,
+                  progressMessage.message_id,
+                  null,
+                  progressText,
+                );
+              } catch (error) {
+                // Игнорируем ошибки редактирования
+              }
+            } else {
+              progressMessage = await bot.telegram.sendMessage(
+                chatId,
                 progressText,
               );
-            } catch (error) {
-              // Игнорируем ошибки редактирования
             }
-          } else {
-            progressMessage = await ctx.reply(progressText);
           }
-        }
-      },
-    );
+        },
+      );
 
-    const message = monthlyStats.formatMonthlyStats(stats, month, year);
-    await ctx.reply(
-      message,
-      keyboards.getMainKeyboard(monitoring.isMonitoringActive(userId)),
-    );
-  } catch (error) {
-    console.error("Error getting monthly statistics:", error);
-    await ctx.reply(
-      "❌ Ошибка при сборе статистики",
-      keyboards.getMainKeyboard(monitoring.isMonitoringActive(userId)),
-    );
-  }
+      const message = monthlyStats.formatMonthlyStats(stats, month, year);
+      await bot.telegram.sendMessage(
+        chatId,
+        message,
+        keyboards.getMainKeyboard(monitoring.isMonitoringActive(userId)),
+      );
+    } catch (error) {
+      console.error("Error getting monthly statistics:", error);
+      await bot.telegram.sendMessage(
+        chatId,
+        "❌ Ошибка при сборе статистики",
+        keyboards.getMainKeyboard(monitoring.isMonitoringActive(userId)),
+      );
+    }
+  });
 });
 
 bot.action("monthly_stats_select", async (ctx) => {
@@ -1607,6 +1629,7 @@ bot.action(/^month_select_(\d+)_(\d+)$/, async (ctx) => {
   const month = parseInt(ctx.match[1]);
   const year = parseInt(ctx.match[2]);
   const userId = ctx.from.id;
+  const chatId = ctx.chat.id;
   const session = await db.getSession(userId);
 
   if (!session?.session_id) {
@@ -1628,49 +1651,59 @@ bot.action(/^month_select_(\d+)_(\d+)$/, async (ctx) => {
     "Декабрь",
   ];
 
-  try {
-    await ctx.reply(
-      `⏳ Собираю статистику за ${monthNames[month - 1]} ${year}...\nЭто может занять несколько минут.`,
-    );
+  // Отправляем начальное сообщение и запускаем сбор статистики в фоне
+  await ctx.reply(
+    `⏳ Собираю статистику за ${monthNames[month - 1]} ${year}...\nЭто может занять несколько минут.\n\n` +
+      "Вы можете продолжить работу с ботом, результат будет отправлен автоматически.",
+  );
 
+  // Запускаем асинхронную обработку без блокировки callback
+  setImmediate(async () => {
     let progressMessage;
-    const stats = await monthlyStats.collectMonthlyStatistics(
-      userId,
-      month,
-      year,
-      async (processed, total) => {
-        if (processed % 5 === 0 || processed === total) {
-          const progressText = `📊 Обработано дней: ${processed}/${total}`;
-          if (progressMessage) {
-            try {
-              await ctx.telegram.editMessageText(
-                ctx.chat.id,
-                progressMessage.message_id,
-                null,
+    try {
+      const stats = await monthlyStats.collectMonthlyStatistics(
+        userId,
+        month,
+        year,
+        async (processed, total) => {
+          if (processed % 5 === 0 || processed === total) {
+            const progressText = `📊 Обработано дней: ${processed}/${total}`;
+            if (progressMessage) {
+              try {
+                await bot.telegram.editMessageText(
+                  chatId,
+                  progressMessage.message_id,
+                  null,
+                  progressText,
+                );
+              } catch (error) {
+                // Игнорируем ошибки редактирования
+              }
+            } else {
+              progressMessage = await bot.telegram.sendMessage(
+                chatId,
                 progressText,
               );
-            } catch (error) {
-              // Игнорируем ошибки редактирования
             }
-          } else {
-            progressMessage = await ctx.reply(progressText);
           }
-        }
-      },
-    );
+        },
+      );
 
-    const message = monthlyStats.formatMonthlyStats(stats, month, year);
-    await ctx.reply(
-      message,
-      keyboards.getMainKeyboard(monitoring.isMonitoringActive(userId)),
-    );
-  } catch (error) {
-    console.error("Error getting monthly statistics:", error);
-    await ctx.reply(
-      "❌ Ошибка при сборе статистики",
-      keyboards.getMainKeyboard(monitoring.isMonitoringActive(userId)),
-    );
-  }
+      const message = monthlyStats.formatMonthlyStats(stats, month, year);
+      await bot.telegram.sendMessage(
+        chatId,
+        message,
+        keyboards.getMainKeyboard(monitoring.isMonitoringActive(userId)),
+      );
+    } catch (error) {
+      console.error("Error getting monthly statistics:", error);
+      await bot.telegram.sendMessage(
+        chatId,
+        "❌ Ошибка при сборе статистики",
+        keyboards.getMainKeyboard(monitoring.isMonitoringActive(userId)),
+      );
+    }
+  });
 });
 
 bot.action("monthly_stats_back", async (ctx) => {
@@ -1679,6 +1712,19 @@ bot.action("monthly_stats_back", async (ctx) => {
     "Выберите период для статистики:",
     keyboards.getMonthlyStatsKeyboard,
   );
+});
+
+// Обработчик ошибок для бота Telegraf
+bot.catch((err, ctx) => {
+  console.error("Unhandled error while processing", ctx.update);
+  console.error("Error:", err);
+
+  // Пытаемся отправить сообщение об ошибке пользователю
+  if (ctx?.reply) {
+    ctx
+      .reply("❌ Произошла ошибка при обработке запроса. Попробуйте позже.")
+      .catch((e) => console.error("Failed to send error message:", e));
+  }
 });
 
 bot.launch();
