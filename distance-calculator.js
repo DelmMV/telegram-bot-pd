@@ -71,7 +71,22 @@ async function geocodeAddress(address) {
  */
 async function extractCoordinates(point) {
   try {
-    // Проверяем разные варианты структуры данных
+    // Приоритет 1: Координаты из Address.Location (API VRP Logdep)
+    if (point.Address?.Location?.Lat && point.Address?.Location?.Lon) {
+      return {
+        lat: parseFloat(point.Address.Location.Lat),
+        lon: parseFloat(point.Address.Location.Lon),
+      };
+    }
+
+    // Приоритет 2: Координаты напрямую из точки (Points маршрута)
+    if (point.Lat && point.Lon) {
+      return {
+        lat: parseFloat(point.Lat),
+        lon: parseFloat(point.Lon),
+      };
+    }
+
     if (point.Latitude && point.Longitude) {
       return {
         lat: parseFloat(point.Latitude),
@@ -93,11 +108,19 @@ async function extractCoordinates(point) {
       };
     }
 
-    // Если координат нет, пробуем геокодировать адрес
+    // Если координат нет, пробуем геокодировать адрес (последний вариант)
     if (point.Address) {
-      const geocoded = await geocodeAddress(point.Address);
-      if (geocoded) {
-        return geocoded;
+      // Если Address - строка, геокодируем её
+      const addressString =
+        typeof point.Address === "string"
+          ? point.Address
+          : point.Address.Raw || point.Address.OriginalRaw;
+
+      if (addressString) {
+        const geocoded = await geocodeAddress(addressString);
+        if (geocoded) {
+          return geocoded;
+        }
       }
     }
 
