@@ -343,9 +343,10 @@ async function calculatePointEarnings(deliveryPoint, startPoint = null) {
 /**
  * Рассчитывает общую статистику заработка для всех точек маршрута
  * @param {Array} points - Массив точек маршрута
+ * @param {Array} orders - Массив заказов с координатами (опционально)
  * @returns {Promise<Object>} { totalDistance, totalEarnings, pointsDetails }
  */
-async function calculateRouteEarnings(points) {
+async function calculateRouteEarnings(points, orders = null) {
   try {
     let totalDistance = 0;
     let totalEarnings = 0;
@@ -366,8 +367,39 @@ async function calculateRouteEarnings(points) {
     for (let i = 1; i < points.length; i++) {
       const point = points[i];
 
+      // Если есть orders, пытаемся найти координаты из заказов
+      let pointWithCoords = point;
+      if (orders && point.Orders && point.Orders.length > 0) {
+        // Находим первый заказ этой точки
+        const orderId = point.Orders[0].Id;
+        const order = orders.find((o) => o.Id === orderId);
+
+        if (
+          order &&
+          order.To &&
+          order.To.Address &&
+          order.To.Address.Location
+        ) {
+          // Создаем объект с координатами из заказа
+          pointWithCoords = {
+            ...point,
+            Address: {
+              Location: {
+                Lat: order.To.Address.Location.Lat,
+                Lon: order.To.Address.Location.Lon,
+              },
+              Raw: order.To.Address.Raw || point.Address,
+              OriginalRaw: order.To.Address.OriginalRaw,
+            },
+          };
+        }
+      }
+
       // Рассчитываем для каждой точки, передавая точку старта
-      const earnings = await calculatePointEarnings(point, startPoint);
+      const earnings = await calculatePointEarnings(
+        pointWithCoords,
+        startPoint,
+      );
 
       // Получаем количество заказов в точке
       const ordersCount = point.Orders?.length || 1;

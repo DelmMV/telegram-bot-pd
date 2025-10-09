@@ -269,6 +269,11 @@ async function showRoutes(ctx, date) {
 
     const response = result.data;
 
+    console.log("=".repeat(80));
+    console.log("Ответ сервера на маршруты (На сегодня):");
+    console.log(JSON.stringify(response, null, 2));
+    console.log("=".repeat(80));
+
     if (!response?.TL_Mobile_EnumRoutesResponse?.Routes) {
       return await ctx.reply(
         `📭 Маршруты на ${date} не найдены`,
@@ -305,6 +310,36 @@ async function showRoutes(ctx, date) {
 
       const routeDetails =
         detailsResult.data.TL_Mobile_GetRoutesResponse.Routes[0];
+
+      console.log("\n" + "=".repeat(80));
+      console.log(`📋 ДЕТАЛИ МАРШРУТА ${routes.indexOf(route) + 1}:`);
+      console.log("=".repeat(80));
+      console.log(`Номер маршрута: ${routeDetails.Number}`);
+      console.log(`Всего точек: ${routeDetails.Points.length}`);
+      console.log(`Единица веса: ${routeDetails.WeightUnit || "не указана"}`);
+      console.log("\nТочки маршрута:");
+
+      routeDetails.Points.forEach((point, index) => {
+        console.log(`\n  📍 Точка ${index} (Label: ${point.Label}):`);
+        console.log(`     Адрес: ${point.Address}`);
+        console.log(`     Координаты: Lat ${point.Lat}, Lon ${point.Lon}`);
+        if (point.Description) {
+          console.log(`     Описание/Получатель: ${point.Description}`);
+        }
+        if (point.Weight) {
+          console.log(`     Вес: ${point.Weight}`);
+        }
+        if (point.Orders && point.Orders.length > 0) {
+          console.log(`     Заказов на точке: ${point.Orders.length}`);
+          point.Orders.forEach((order, orderIndex) => {
+            console.log(
+              `       Заказ ${orderIndex + 1}: ID=${order.Id}, ExternalId=${order.ExternalId || "нет"}`,
+            );
+          });
+        }
+      });
+      console.log("=".repeat(80));
+
       const orderIds = routeDetails.Points.flatMap(
         (point) => point.Orders?.map((order) => order.Id) || [],
       ).filter((id) => id);
@@ -320,6 +355,33 @@ async function showRoutes(ctx, date) {
       }
 
       const orders = orderDetailsResult.data.TL_Mobile_GetOrdersResponse.Orders;
+
+      console.log("\n" + "=".repeat(80));
+      console.log(
+        `📦 ДЕТАЛИ ЗАКАЗОВ ДЛЯ МАРШРУТА ${routes.indexOf(route) + 1}:`,
+      );
+      console.log("=".repeat(80));
+      orders.forEach((order, index) => {
+        console.log(`\n  Заказ ${index + 1}:`);
+        console.log(`    ID: ${order.Id}`);
+        console.log(`    ExternalId: ${order.ExternalId || "не указан"}`);
+        console.log(`    Статус: ${order.CustomState || "не указан"}`);
+        if (order.InvoiceTotal) {
+          console.log(`    Стоимость: ${order.InvoiceTotal} руб.`);
+        }
+        if (order.Weight) {
+          console.log(`    Вес: ${order.Weight}`);
+        }
+        if (order.Description) {
+          console.log(`    Описание: ${order.Description}`);
+        }
+        console.log(
+          `    Полные данные заказа:`,
+          JSON.stringify(order, null, 2),
+        );
+      });
+      console.log("=".repeat(80) + "\n");
+
       let messageText = `🚚 Маршрут ${routes.indexOf(route) + 1}\n`;
       messageText += `📝 Номер: ${routeDetails.Number}\n`;
       messageText += `📦 Всего точек: ${routeDetails.Points.length - 1}\n\n`;
@@ -779,10 +841,32 @@ async function showStatistics(ctx, date) {
       const routeDetails =
         detailsResult.data.TL_Mobile_GetRoutesResponse.Routes[0];
 
-      // Рассчитываем расстояние и заработок для маршрута
+      // Собираем только уникальные ID заказов
+      const orderIds = Array.from(
+        new Set(
+          routeDetails.Points.flatMap(
+            (point) => point.Orders?.map((order) => order.Id) || [],
+          ).filter((id) => id),
+        ),
+      );
+
+      const orderDetailsResult = await api.getOrderDetails(
+        session.session_id,
+        orderIds,
+        credentials,
+      );
+      if (orderDetailsResult.sessionUpdated) {
+        session.session_id = orderDetailsResult.newSessionId;
+        await db.saveSession(ctx.from.id, session);
+      }
+
+      const orders = orderDetailsResult.data.TL_Mobile_GetOrdersResponse.Orders;
+
+      // Рассчитываем расстояние и заработок для маршрута (после получения orders)
       try {
         const routeEarnings = await distanceCalculator.calculateRouteEarnings(
           routeDetails.Points,
+          orders, // Передаем orders для извлечения координат
         );
 
         if (!routeEarnings.error) {
@@ -806,27 +890,6 @@ async function showStatistics(ctx, date) {
           error,
         );
       }
-
-      // Собираем только уникальные ID заказов
-      const orderIds = Array.from(
-        new Set(
-          routeDetails.Points.flatMap(
-            (point) => point.Orders?.map((order) => order.Id) || [],
-          ).filter((id) => id),
-        ),
-      );
-
-      const orderDetailsResult = await api.getOrderDetails(
-        session.session_id,
-        orderIds,
-        credentials,
-      );
-      if (orderDetailsResult.sessionUpdated) {
-        session.session_id = orderDetailsResult.newSessionId;
-        await db.saveSession(ctx.from.id, session);
-      }
-
-      const orders = orderDetailsResult.data.TL_Mobile_GetOrdersResponse.Orders;
       orders.forEach((order) => {
         if (order.InvoiceTotal) {
           const amount = parseFloat(order.InvoiceTotal) || 0;

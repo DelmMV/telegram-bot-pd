@@ -63,34 +63,6 @@ async function getDailyStatistics(userId, date, sessionId, credentials) {
       const routeDetails =
         detailsResult.data.TL_Mobile_GetRoutesResponse.Routes[0];
 
-      // Рассчитываем расстояние и заработок для маршрута
-      try {
-        const routeEarnings = await distanceCalculator.calculateRouteEarnings(
-          routeDetails.Points,
-        );
-
-        if (!routeEarnings.error) {
-          totalDistance += routeEarnings.totalDistance;
-          totalEarnings += routeEarnings.totalEarnings;
-
-          console.log(
-            `Route ${route.Id}: ${routeEarnings.pointsCount} points, ` +
-              `distance: ${routeEarnings.totalDistance.toFixed(2)} km, ` +
-              `earnings: ${routeEarnings.totalEarnings.toFixed(2)} rub`,
-          );
-        } else {
-          console.error(
-            `Error calculating earnings for route ${route.Id}:`,
-            routeEarnings.error,
-          );
-        }
-      } catch (error) {
-        console.error(
-          `Exception calculating earnings for route ${route.Id}:`,
-          error,
-        );
-      }
-
       const orderIds = Array.from(
         new Set(
           routeDetails.Points.flatMap(
@@ -117,6 +89,36 @@ async function getDailyStatistics(userId, date, sessionId, credentials) {
       }
 
       const orders = orderDetailsResult.data.TL_Mobile_GetOrdersResponse.Orders;
+
+      // Рассчитываем расстояние и заработок для маршрута (после получения orders)
+      try {
+        const routeEarnings = await distanceCalculator.calculateRouteEarnings(
+          routeDetails.Points,
+          orders, // Передаем orders для извлечения координат
+        );
+
+        if (!routeEarnings.error) {
+          totalDistance += routeEarnings.totalDistance;
+          totalEarnings += routeEarnings.totalEarnings;
+
+          console.log(
+            `Route ${route.Id}: ${routeEarnings.pointsCount} points, ` +
+              `distance: ${routeEarnings.totalDistance.toFixed(2)} km, ` +
+              `earnings: ${routeEarnings.totalEarnings.toFixed(2)} rub`,
+          );
+        } else {
+          console.error(
+            `Error calculating earnings for route ${route.Id}:`,
+            routeEarnings.error,
+          );
+        }
+      } catch (error) {
+        console.error(
+          `Exception calculating earnings for route ${route.Id}:`,
+          error,
+        );
+      }
+
       orders.forEach((order) => {
         if (order.InvoiceTotal) {
           const amount = parseFloat(order.InvoiceTotal) || 0;
