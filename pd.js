@@ -5,6 +5,7 @@ const api = require("./api");
 const keyboards = require("./keyboards");
 const monitoring = require("./monitoring");
 const monthlyStats = require("./monthly-stats");
+const distanceCalculator = require("./distance-calculator");
 
 const bot = new Telegraf(config.TELEGRAM_TOKEN);
 
@@ -758,6 +759,8 @@ async function showStatistics(ctx, date) {
     );
     let completedOrders = 0;
     let canceledOrders = 0;
+    let totalDistance = 0;
+    let totalEarnings = 0;
 
     let orderDetails = [];
 
@@ -775,6 +778,23 @@ async function showStatistics(ctx, date) {
 
       const routeDetails =
         detailsResult.data.TL_Mobile_GetRoutesResponse.Routes[0];
+
+      // Рассчитываем расстояние и заработок для маршрута
+      try {
+        const routeEarnings = await distanceCalculator.calculateRouteEarnings(
+          routeDetails.Points,
+        );
+
+        if (!routeEarnings.error) {
+          totalDistance += routeEarnings.totalDistance;
+          totalEarnings += routeEarnings.totalEarnings;
+        }
+      } catch (error) {
+        console.error(
+          `Error calculating earnings for route ${route.Id}:`,
+          error,
+        );
+      }
 
       // Собираем только уникальные ID заказов
       const orderIds = Array.from(
@@ -845,18 +865,26 @@ async function showStatistics(ctx, date) {
       });
     }
     const totalAmount = totalCashAmount + totalNonCashAmount + totalSiteAmount;
+    const averagePerOrder =
+      completedOrders > 0 ? totalEarnings / completedOrders : 0;
 
     // Отправляем основную статистику
     const statsMessage =
       `📊 Общая статистика на ${date}:\n\n` +
-      `💰 Финансы:\n` +
+      `🛣️ Расстояние и заработок:\n` +
+      `├ 📏 Общий пробег: ${totalDistance.toFixed(2)} км\n` +
+      `├ 💵 Заработано: ${totalEarnings.toFixed(2)} руб.\n` +
+      `└ 📊 Средний заказ: ${averagePerOrder.toFixed(2)} руб.\n\n` +
+      `💰 Финансы (от клиентов):\n` +
       `├ 💵 Наличные: ${totalCashAmount.toFixed(2)} руб.\n` +
       `├ 💳 Терминал: ${totalNonCashAmount.toFixed(2)} руб.\n` +
       `├ 🌐 Сайт: ${totalSiteAmount.toFixed(2)} руб.\n` +
       `└ 📈 Всего: ${totalAmount.toFixed(2)} руб.\n\n` +
       `📦 Информация о заказах:\n` +
       `├ 🚚 Всего маршрутов: ${routes.length}\n` +
-      `└ 📋 Всего заказов: ${totalOrders}\n`;
+      `├ 📋 Всего заказов: ${totalOrders}\n` +
+      `├ ✅ Выполнено: ${completedOrders}\n` +
+      `└ ❌ Отменено: ${canceledOrders}\n`;
 
     await ctx.reply(
       statsMessage,
