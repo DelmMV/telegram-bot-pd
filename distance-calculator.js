@@ -280,12 +280,23 @@ async function calculateRouteEarnings(points) {
     let totalEarnings = 0;
     const pointsDetails = [];
 
-    // Пропускаем первую точку (это обычно склад/производство)
+    // Извлекаем координаты точки производства (первая точка маршрута)
+    let startPoint = null;
+    if (points && points.length > 0) {
+      startPoint = await extractCoordinates(points[0]);
+    }
+
+    // Если не удалось получить координаты производства, используем из config
+    if (!startPoint) {
+      startPoint = config.START_POINT;
+    }
+
+    // Пропускаем первую точку (это точка производства/склад)
     for (let i = 1; i < points.length; i++) {
       const point = points[i];
 
-      // Рассчитываем для каждой точки
-      const earnings = await calculatePointEarnings(point);
+      // Рассчитываем для каждой точки, передавая точку старта
+      const earnings = await calculatePointEarnings(point, startPoint);
 
       if (!earnings.error) {
         // Получаем количество заказов в точке
