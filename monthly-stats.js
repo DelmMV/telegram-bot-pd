@@ -43,8 +43,6 @@ async function getDailyStatistics(userId, date, sessionId, credentials) {
     );
     let completedOrders = 0;
     let canceledOrders = 0;
-    let totalDistance = 0;
-    let totalEarnings = 0;
 
     for (const route of routes) {
       const detailsResult = await api.getRouteDetails(
@@ -90,35 +88,6 @@ async function getDailyStatistics(userId, date, sessionId, credentials) {
 
       const orders = orderDetailsResult.data.TL_Mobile_GetOrdersResponse.Orders;
 
-      // Рассчитываем расстояние и заработок для маршрута (после получения orders)
-      try {
-        const routeEarnings = await distanceCalculator.calculateRouteEarnings(
-          routeDetails.Points,
-          orders, // Передаем orders для извлечения координат
-        );
-
-        if (!routeEarnings.error) {
-          totalDistance += routeEarnings.totalDistance;
-          totalEarnings += routeEarnings.totalEarnings;
-
-          console.log(
-            `Route ${route.Id}: ${routeEarnings.pointsCount} points, ` +
-              `distance: ${routeEarnings.totalDistance.toFixed(2)} km, ` +
-              `earnings: ${routeEarnings.totalEarnings.toFixed(2)} rub`,
-          );
-        } else {
-          console.error(
-            `Error calculating earnings for route ${route.Id}:`,
-            routeEarnings.error,
-          );
-        }
-      } catch (error) {
-        console.error(
-          `Exception calculating earnings for route ${route.Id}:`,
-          error,
-        );
-      }
-
       orders.forEach((order) => {
         if (order.InvoiceTotal) {
           const amount = parseFloat(order.InvoiceTotal) || 0;
@@ -155,8 +124,6 @@ async function getDailyStatistics(userId, date, sessionId, credentials) {
       siteAmount: totalSiteAmount,
       totalAmount,
       routesCount: routes.length,
-      totalDistance: Math.round(totalDistance * 100) / 100,
-      totalEarnings,
     };
   } catch (error) {
     console.error("Error getting daily statistics:", error);
@@ -246,12 +213,6 @@ function formatMonthlyStats(stats, month, year) {
     "Декабрь",
   ];
 
-  const totalDistance = stats.total_distance || 0;
-  const totalEarnings = stats.total_earnings || 0;
-  const completedOrders = stats.completed_orders || 0;
-  const averagePerOrder =
-    completedOrders > 0 ? totalEarnings / completedOrders : 0;
-
   return (
     `📊 Статистика за ${monthNames[month - 1]} ${year}\n\n` +
     `🚗 Смены: ${stats.shifts_count || 0}\n` +
@@ -260,10 +221,6 @@ function formatMonthlyStats(stats, month, year) {
     `├ 📋 Всего: ${stats.total_orders || 0}\n` +
     `├ ✅ Выполнено: ${stats.completed_orders || 0}\n` +
     `└ ❌ Отменено: ${stats.canceled_orders || 0}\n\n` +
-    `🛣️ Расстояние и заработок:\n` +
-    `├ 📏 Общий пробег: ${totalDistance.toFixed(2)} км\n` +
-    `├ 💵 Заработано: ${totalEarnings.toFixed(2)} руб.\n` +
-    `└ 📊 Средний заказ: ${averagePerOrder.toFixed(2)} руб.\n\n` +
     `💰 Финансы (от клиентов):\n` +
     `├ 💵 Наличные: ${(stats.cash_amount || 0).toFixed(2)} руб.\n` +
     `├ 💳 Терминал: ${(stats.non_cash_amount || 0).toFixed(2)} руб.\n` +

@@ -269,11 +269,6 @@ async function showRoutes(ctx, date) {
 
     const response = result.data;
 
-    console.log("=".repeat(80));
-    console.log("Ответ сервера на маршруты (На сегодня):");
-    console.log(JSON.stringify(response, null, 2));
-    console.log("=".repeat(80));
-
     if (!response?.TL_Mobile_EnumRoutesResponse?.Routes) {
       return await ctx.reply(
         `📭 Маршруты на ${date} не найдены`,
@@ -311,35 +306,6 @@ async function showRoutes(ctx, date) {
       const routeDetails =
         detailsResult.data.TL_Mobile_GetRoutesResponse.Routes[0];
 
-      console.log("\n" + "=".repeat(80));
-      console.log(`📋 ДЕТАЛИ МАРШРУТА ${routes.indexOf(route) + 1}:`);
-      console.log("=".repeat(80));
-      console.log(`Номер маршрута: ${routeDetails.Number}`);
-      console.log(`Всего точек: ${routeDetails.Points.length}`);
-      console.log(`Единица веса: ${routeDetails.WeightUnit || "не указана"}`);
-      console.log("\nТочки маршрута:");
-
-      routeDetails.Points.forEach((point, index) => {
-        console.log(`\n  📍 Точка ${index} (Label: ${point.Label}):`);
-        console.log(`     Адрес: ${point.Address}`);
-        console.log(`     Координаты: Lat ${point.Lat}, Lon ${point.Lon}`);
-        if (point.Description) {
-          console.log(`     Описание/Получатель: ${point.Description}`);
-        }
-        if (point.Weight) {
-          console.log(`     Вес: ${point.Weight}`);
-        }
-        if (point.Orders && point.Orders.length > 0) {
-          console.log(`     Заказов на точке: ${point.Orders.length}`);
-          point.Orders.forEach((order, orderIndex) => {
-            console.log(
-              `       Заказ ${orderIndex + 1}: ID=${order.Id}, ExternalId=${order.ExternalId || "нет"}`,
-            );
-          });
-        }
-      });
-      console.log("=".repeat(80));
-
       const orderIds = routeDetails.Points.flatMap(
         (point) => point.Orders?.map((order) => order.Id) || [],
       ).filter((id) => id);
@@ -355,32 +321,6 @@ async function showRoutes(ctx, date) {
       }
 
       const orders = orderDetailsResult.data.TL_Mobile_GetOrdersResponse.Orders;
-
-      console.log("\n" + "=".repeat(80));
-      console.log(
-        `📦 ДЕТАЛИ ЗАКАЗОВ ДЛЯ МАРШРУТА ${routes.indexOf(route) + 1}:`,
-      );
-      console.log("=".repeat(80));
-      orders.forEach((order, index) => {
-        console.log(`\n  Заказ ${index + 1}:`);
-        console.log(`    ID: ${order.Id}`);
-        console.log(`    ExternalId: ${order.ExternalId || "не указан"}`);
-        console.log(`    Статус: ${order.CustomState || "не указан"}`);
-        if (order.InvoiceTotal) {
-          console.log(`    Стоимость: ${order.InvoiceTotal} руб.`);
-        }
-        if (order.Weight) {
-          console.log(`    Вес: ${order.Weight}`);
-        }
-        if (order.Description) {
-          console.log(`    Описание: ${order.Description}`);
-        }
-        console.log(
-          `    Полные данные заказа:`,
-          JSON.stringify(order, null, 2),
-        );
-      });
-      console.log("=".repeat(80) + "\n");
 
       let messageText = `🚚 Маршрут ${routes.indexOf(route) + 1}\n`;
       messageText += `📝 Номер: ${routeDetails.Number}\n`;
@@ -821,8 +761,6 @@ async function showStatistics(ctx, date) {
     );
     let completedOrders = 0;
     let canceledOrders = 0;
-    let totalDistance = 0;
-    let totalEarnings = 0;
 
     let orderDetails = [];
 
@@ -861,35 +799,6 @@ async function showStatistics(ctx, date) {
       }
 
       const orders = orderDetailsResult.data.TL_Mobile_GetOrdersResponse.Orders;
-
-      // Рассчитываем расстояние и заработок для маршрута (после получения orders)
-      try {
-        const routeEarnings = await distanceCalculator.calculateRouteEarnings(
-          routeDetails.Points,
-          orders, // Передаем orders для извлечения координат
-        );
-
-        if (!routeEarnings.error) {
-          totalDistance += routeEarnings.totalDistance;
-          totalEarnings += routeEarnings.totalEarnings;
-
-          console.log(
-            `Route ${route.Id}: ${routeEarnings.pointsCount} points, ` +
-              `distance: ${routeEarnings.totalDistance.toFixed(2)} km, ` +
-              `earnings: ${routeEarnings.totalEarnings.toFixed(2)} rub`,
-          );
-        } else {
-          console.error(
-            `Error calculating earnings for route ${route.Id}:`,
-            routeEarnings.error,
-          );
-        }
-      } catch (error) {
-        console.error(
-          `Exception calculating earnings for route ${route.Id}:`,
-          error,
-        );
-      }
       orders.forEach((order) => {
         if (order.InvoiceTotal) {
           const amount = parseFloat(order.InvoiceTotal) || 0;
@@ -939,16 +848,10 @@ async function showStatistics(ctx, date) {
       });
     }
     const totalAmount = totalCashAmount + totalNonCashAmount + totalSiteAmount;
-    const averagePerOrder =
-      completedOrders > 0 ? totalEarnings / completedOrders : 0;
 
-    // Отправляем основную статистику
+    // Отправляем основную статистику (без блока расстояния и заработка)
     const statsMessage =
       `📊 Общая статистика на ${date}:\n\n` +
-      `🛣️ Расстояние и заработок:\n` +
-      `├ 📏 Общий пробег: ${totalDistance.toFixed(2)} км\n` +
-      `├ 💵 Заработано: ${totalEarnings.toFixed(2)} руб.\n` +
-      `└ 📊 Средний заказ: ${averagePerOrder.toFixed(2)} руб.\n\n` +
       `💰 Финансы (от клиентов):\n` +
       `├ 💵 Наличные: ${totalCashAmount.toFixed(2)} руб.\n` +
       `├ 💳 Терминал: ${totalNonCashAmount.toFixed(2)} руб.\n` +
@@ -1257,7 +1160,7 @@ bot.on("text", async (ctx) => {
       );
       return;
 
-    case "🟢 Запустить мониторинг":
+    case "🟢 Включить уведомления":
       if (!session?.session_id) {
         return await ctx.reply(
           "Вы не авторизованы",
@@ -1285,7 +1188,7 @@ bot.on("text", async (ctx) => {
       }
       return;
 
-    case "🔴 Остановить мониторинг":
+    case "🔴 Выключить уведомления":
       if (monitoring.stopMonitoring(userId)) {
         await ctx.reply(
           "✅ Мониторинг отключен",
