@@ -73,6 +73,21 @@ const parseBroadcastText = (text) =>
     .replace(/^\/(?:broadcast|br)(?:@\w+)?\s*/i, "")
     .trim();
 
+const getTelegramErrorCode = (error) =>
+  error?.response?.error_code || error?.response?.status;
+
+const isUserUnreachable = (error) => {
+  const code = getTelegramErrorCode(error);
+  if (code === 403) return true;
+  if (code !== 400) return false;
+  const description = (error?.response?.description || "").toLowerCase();
+  return (
+    description.includes("chat not found") ||
+    description.includes("user is deactivated") ||
+    description.includes("bot was blocked")
+  );
+};
+
 async function broadcastMessage(adminId, messageText) {
   const userIds = await db.getAllUserIds();
   const total = userIds.length;
@@ -89,6 +104,7 @@ async function broadcastMessage(adminId, messageText) {
 
   let sent = 0;
   let failed = 0;
+  let blocked = 0;
 
   for (const userId of userIds) {
     try {
@@ -97,8 +113,21 @@ async function broadcastMessage(adminId, messageText) {
       });
       sent += 1;
     } catch (error) {
-      failed += 1;
-      console.error(`Broadcast failed for user ${userId}:`, error);
+      if (isUserUnreachable(error)) {
+        blocked += 1;
+        console.warn(`Broadcast skipped for user ${userId}: unreachable.`);
+        try {
+          await db.deleteSession(userId);
+        } catch (dbError) {
+          console.error(
+            `Failed to delete session for unreachable user ${userId}:`,
+            dbError,
+          );
+        }
+      } else {
+        failed += 1;
+        console.error(`Broadcast failed for user ${userId}:`, error);
+      }
     }
 
     if (config.BROADCAST_DELAY_MS > 0) {
@@ -108,7 +137,7 @@ async function broadcastMessage(adminId, messageText) {
 
   await sendTelegramMessage(
     adminId,
-    `✅ Рассылка завершена. Успешно: ${sent}, ошибок: ${failed}.`,
+    `✅ Рассылка завершена. Успешно: ${sent}, заблокировали: ${blocked}, ошибок: ${failed}.`,
   );
 }
 
