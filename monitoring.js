@@ -16,32 +16,48 @@ class MonitoringService {
             return false;
         }
 
-        const intervalId = setInterval(async () => {
+        const safeInterval = Number.isFinite(interval) ? interval : 60000;
+        const monitoringState = { intervalId: null, isRunning: false };
+
+        const runCheck = async () => {
             if (this.shouldStopMonitoring()) {
                 this.stopMonitoring(userId);
                 try {
                     const bot = require('./pd').bot;
                     await bot.telegram.sendMessage(
-                        userId, 
+                        userId,
                         '🔴 Мониторинг автоматически остановлен',
-                        keyboards.getMainKeyboard(false) // Обновляем клавиатуру
+                        keyboards.getMainKeyboard(false)
                     );
                 } catch (error) {
                     console.error('Error sending monitoring stop notification:', error);
                 }
                 return;
             }
-            checkFunction(userId, sessionId);
-        }, interval);
 
-        this.activeMonitoring.set(userId, intervalId);
+            if (monitoringState.isRunning) {
+                return;
+            }
+
+            monitoringState.isRunning = true;
+            try {
+                await checkFunction(userId, sessionId);
+            } catch (error) {
+                console.error('Error during monitoring check:', error);
+            } finally {
+                monitoringState.isRunning = false;
+            }
+        };
+
+        monitoringState.intervalId = setInterval(runCheck, safeInterval);
+        this.activeMonitoring.set(userId, monitoringState);
         return true;
     }
 
     stopMonitoring(userId) {
-        const intervalId = this.activeMonitoring.get(userId);
-        if (intervalId) {
-            clearInterval(intervalId);
+        const monitoringState = this.activeMonitoring.get(userId);
+        if (monitoringState?.intervalId) {
+            clearInterval(monitoringState.intervalId);
             this.activeMonitoring.delete(userId);
             this.lastKnownOrders.delete(userId);
             return true;

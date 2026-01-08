@@ -2,8 +2,30 @@ require("dotenv").config();
 
 module.exports = {
   TELEGRAM_TOKEN: process.env.TELEGRAM_TOKEN,
-  INTERVAL_UPDATES: parseInt(process.env.INTERVAL_UPDATES, 10),
+  INTERVAL_UPDATES: parseInt(process.env.INTERVAL_UPDATES || "60000", 10),
   API_URL: "http://vrp.logdep.ru/dl/storage",
+  API_TIMEOUT_MS: parseInt(process.env.API_TIMEOUT_MS || "15000", 10),
+  API_RETRY_ATTEMPTS: parseInt(process.env.API_RETRY_ATTEMPTS || "3", 10),
+  API_RETRY_BASE_DELAY_MS: parseInt(
+    process.env.API_RETRY_BASE_DELAY_MS || "750",
+    10,
+  ),
+  API_RETRY_MAX_DELAY_MS: parseInt(
+    process.env.API_RETRY_MAX_DELAY_MS || "5000",
+    10,
+  ),
+  TELEGRAM_RETRY_ATTEMPTS: parseInt(
+    process.env.TELEGRAM_RETRY_ATTEMPTS || "3",
+    10,
+  ),
+  TELEGRAM_RETRY_BASE_DELAY_MS: parseInt(
+    process.env.TELEGRAM_RETRY_BASE_DELAY_MS || "500",
+    10,
+  ),
+  TELEGRAM_RETRY_MAX_DELAY_MS: parseInt(
+    process.env.TELEGRAM_RETRY_MAX_DELAY_MS || "5000",
+    10,
+  ),
   DB_PATH: "sessions.db",
   MAX_MESSAGE_LENGTH: 4096,
   DATE_FORMAT: "DD.MM.YYYY",

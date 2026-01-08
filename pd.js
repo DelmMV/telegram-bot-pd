@@ -9,6 +9,61 @@ const distanceCalculator = require("./distance-calculator");
 
 const bot = new Telegraf(config.TELEGRAM_TOKEN);
 
+const inFlightChecks = new Set();
+const RETRYABLE_TELEGRAM_STATUS = new Set([429, 500, 502, 503, 504]);
+const RETRYABLE_TELEGRAM_CODES = new Set([
+  "ECONNRESET",
+  "ETIMEDOUT",
+  "ECONNABORTED",
+  "EAI_AGAIN",
+  "ENOTFOUND",
+  "ENETUNREACH",
+  "ECONNREFUSED",
+]);
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const getTelegramRetryDelay = (attempt, error) => {
+  const retryAfter =
+    error?.parameters?.retry_after || error?.response?.parameters?.retry_after;
+  if (Number.isFinite(retryAfter)) {
+    return retryAfter * 1000;
+  }
+  const baseDelay = config.TELEGRAM_RETRY_BASE_DELAY_MS;
+  const maxDelay = config.TELEGRAM_RETRY_MAX_DELAY_MS;
+  const delay = Math.min(maxDelay, baseDelay * 2 ** (attempt - 1));
+  return delay + Math.floor(Math.random() * 100);
+};
+
+const isRetryableTelegramError = (error) => {
+  const status = error?.response?.error_code || error?.response?.status;
+  if (status && RETRYABLE_TELEGRAM_STATUS.has(status)) {
+    return true;
+  }
+  const code = error?.code;
+  return code && RETRYABLE_TELEGRAM_CODES.has(code);
+};
+
+async function sendTelegramMessage(chatId, text, options) {
+  const maxAttempts = Math.max(1, config.TELEGRAM_RETRY_ATTEMPTS);
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await bot.telegram.sendMessage(chatId, text, options);
+    } catch (error) {
+      const isLastAttempt = attempt >= maxAttempts;
+      if (isLastAttempt || !isRetryableTelegramError(error)) {
+        throw error;
+      }
+      const delay = getTelegramRetryDelay(attempt, error);
+      console.warn(
+        `Telegram sendMessage failed (attempt ${attempt}), retrying in ${delay}ms`,
+        error.code || error.message,
+      );
+      await sleep(delay);
+    }
+  }
+}
+
 const ORDER_STATES = {
   "51e45c11-d5c7-4383-8fc4-a2e2e1781230": "Отменён",
   "dfab6563-55b8-475d-aac5-01b6705265cd": "Новый",
@@ -26,22 +81,36 @@ function getOrderStatusName(statusId) {
   return ORDER_STATES[statusId] || "Неизвестный статус";
 }
 
-async function checkNewOrders(userId, sessionId) {
+async function checkNewOrders(userId, sessionId, allowReentry = false) {
+  if (!allowReentry && inFlightChecks.has(userId)) {
+    return;
+  }
+  if (!allowReentry) {
+    inFlightChecks.add(userId);
+  }
+
   try {
     const session = await db.getSession(userId);
+    if (!session) {
+      return;
+    }
+    if (!session.session_id && !sessionId) {
+      return;
+    }
     const credentials = {
       clientCode: session.client_code,
       login: session.login,
       password: session.password,
     };
 
+    let activeSessionId = session?.session_id || sessionId;
     const currentDate = new Date().toLocaleDateString("ru-RU");
-    const result = await api.getRoutes(sessionId, currentDate, credentials);
+    const result = await api.getRoutes(activeSessionId, currentDate, credentials);
 
     if (result.sessionUpdated) {
       session.session_id = result.newSessionId;
       await db.saveSession(userId, session);
-      sessionId = result.newSessionId;
+      activeSessionId = result.newSessionId;
     }
 
     const response = result.data;
@@ -69,7 +138,7 @@ async function checkNewOrders(userId, sessionId) {
 
         if (hasNewOrders) {
           const detailsResult = await api.getRouteDetails(
-            sessionId,
+            activeSessionId,
             [route.Id],
             credentials,
           );
@@ -77,7 +146,7 @@ async function checkNewOrders(userId, sessionId) {
           if (detailsResult.sessionUpdated) {
             session.session_id = detailsResult.newSessionId;
             await db.saveSession(userId, session);
-            sessionId = detailsResult.newSessionId;
+            activeSessionId = detailsResult.newSessionId;
           }
 
           const routeDetails =
@@ -90,14 +159,14 @@ async function checkNewOrders(userId, sessionId) {
 
           // Получаем детальную информацию о заказах
           const orderDetailsResult = await api.getOrderDetails(
-            sessionId,
+            activeSessionId,
             orderIds,
             credentials,
           );
           if (orderDetailsResult.sessionUpdated) {
             session.session_id = orderDetailsResult.newSessionId;
             await db.saveSession(userId, session);
-            sessionId = orderDetailsResult.newSessionId;
+            activeSessionId = orderDetailsResult.newSessionId;
           }
 
           const orders =
@@ -197,22 +266,31 @@ async function checkNewOrders(userId, sessionId) {
                 }
               }
 
-              await bot.telegram.sendMessage(
-                userId,
-                messageText.slice(position, endPosition),
-                {
-                  parse_mode: "HTML",
-                  disable_web_page_preview: true,
-                },
-              );
+              try {
+                await sendTelegramMessage(
+                  userId,
+                  messageText.slice(position, endPosition),
+                  {
+                    parse_mode: "HTML",
+                    disable_web_page_preview: true,
+                  },
+                );
+              } catch (sendError) {
+                console.error("Error sending order notification:", sendError);
+                break;
+              }
 
               position = endPosition;
             }
           } else {
-            await bot.telegram.sendMessage(userId, messageText, {
-              parse_mode: "HTML",
-              disable_web_page_preview: true,
-            });
+            try {
+              await sendTelegramMessage(userId, messageText, {
+                parse_mode: "HTML",
+                disable_web_page_preview: true,
+              });
+            } catch (sendError) {
+              console.error("Error sending order notification:", sendError);
+            }
           }
         }
       }
@@ -234,15 +312,23 @@ async function checkNewOrders(userId, sessionId) {
         const authResponse = await api.refreshSession(credentials);
         session.session_id = authResponse;
         await db.saveSession(userId, session);
-        await checkNewOrders(userId, authResponse);
+        await checkNewOrders(userId, authResponse, true);
       } catch (refreshError) {
         console.error("Session refresh error:", refreshError);
-        await bot.telegram.sendMessage(
-          userId,
-          "Ошибка обновления сессии. Пожалуйста, авторизуйтесь заново через /start",
-        );
+        try {
+          await sendTelegramMessage(
+            userId,
+            "Ошибка обновления сессии. Пожалуйста, авторизуйтесь заново через /start",
+          );
+        } catch (sendError) {
+          console.error("Error sending session refresh message:", sendError);
+        }
         monitoring.stopMonitoring(userId);
       }
+    }
+  } finally {
+    if (!allowReentry) {
+      inFlightChecks.delete(userId);
     }
   }
 }
@@ -1180,11 +1266,11 @@ bot.on("text", async (ctx) => {
         config.INTERVAL_UPDATES,
       );
       if (started) {
-        await checkNewOrders(userId, session.session_id);
         await ctx.reply(
           "✅ Мониторинг новых заказов включен",
           keyboards.getMainKeyboard(true),
         );
+        void checkNewOrders(userId, session.session_id);
       }
       return;
 
@@ -1509,28 +1595,42 @@ bot.action("monthly_stats_current", async (ctx) => {
                 // Игнорируем ошибки редактирования
               }
             } else {
-              progressMessage = await bot.telegram.sendMessage(
-                chatId,
-                progressText,
-              );
+              try {
+                progressMessage = await sendTelegramMessage(
+                  chatId,
+                  progressText,
+                );
+              } catch (sendError) {
+                console.error(
+                  "Error sending monthly stats progress message:",
+                  sendError,
+                );
+              }
             }
           }
         },
       );
 
       const message = monthlyStats.formatMonthlyStats(stats, month, year);
-      await bot.telegram.sendMessage(
+      await sendTelegramMessage(
         chatId,
         message,
         keyboards.getMainKeyboard(monitoring.isMonitoringActive(userId)),
       );
     } catch (error) {
       console.error("Error getting monthly statistics:", error);
-      await bot.telegram.sendMessage(
-        chatId,
-        "❌ Ошибка при сборе статистики",
-        keyboards.getMainKeyboard(monitoring.isMonitoringActive(userId)),
-      );
+      try {
+        await sendTelegramMessage(
+          chatId,
+          "❌ Ошибка при сборе статистики",
+          keyboards.getMainKeyboard(monitoring.isMonitoringActive(userId)),
+        );
+      } catch (sendError) {
+        console.error(
+          "Error sending monthly stats error message:",
+          sendError,
+        );
+      }
     }
   });
 });
@@ -1579,28 +1679,42 @@ bot.action("monthly_stats_previous", async (ctx) => {
                 // Игнорируем ошибки редактирования
               }
             } else {
-              progressMessage = await bot.telegram.sendMessage(
-                chatId,
-                progressText,
-              );
+              try {
+                progressMessage = await sendTelegramMessage(
+                  chatId,
+                  progressText,
+                );
+              } catch (sendError) {
+                console.error(
+                  "Error sending monthly stats progress message:",
+                  sendError,
+                );
+              }
             }
           }
         },
       );
 
       const message = monthlyStats.formatMonthlyStats(stats, month, year);
-      await bot.telegram.sendMessage(
+      await sendTelegramMessage(
         chatId,
         message,
         keyboards.getMainKeyboard(monitoring.isMonitoringActive(userId)),
       );
     } catch (error) {
       console.error("Error getting monthly statistics:", error);
-      await bot.telegram.sendMessage(
-        chatId,
-        "❌ Ошибка при сборе статистики",
-        keyboards.getMainKeyboard(monitoring.isMonitoringActive(userId)),
-      );
+      try {
+        await sendTelegramMessage(
+          chatId,
+          "❌ Ошибка при сборе статистики",
+          keyboards.getMainKeyboard(monitoring.isMonitoringActive(userId)),
+        );
+      } catch (sendError) {
+        console.error(
+          "Error sending monthly stats error message:",
+          sendError,
+        );
+      }
     }
   });
 });
@@ -1685,28 +1799,42 @@ bot.action(/^month_select_(\d+)_(\d+)$/, async (ctx) => {
                 // Игнорируем ошибки редактирования
               }
             } else {
-              progressMessage = await bot.telegram.sendMessage(
-                chatId,
-                progressText,
-              );
+              try {
+                progressMessage = await sendTelegramMessage(
+                  chatId,
+                  progressText,
+                );
+              } catch (sendError) {
+                console.error(
+                  "Error sending monthly stats progress message:",
+                  sendError,
+                );
+              }
             }
           }
         },
       );
 
       const message = monthlyStats.formatMonthlyStats(stats, month, year);
-      await bot.telegram.sendMessage(
+      await sendTelegramMessage(
         chatId,
         message,
         keyboards.getMainKeyboard(monitoring.isMonitoringActive(userId)),
       );
     } catch (error) {
       console.error("Error getting monthly statistics:", error);
-      await bot.telegram.sendMessage(
-        chatId,
-        "❌ Ошибка при сборе статистики",
-        keyboards.getMainKeyboard(monitoring.isMonitoringActive(userId)),
-      );
+      try {
+        await sendTelegramMessage(
+          chatId,
+          "❌ Ошибка при сборе статистики",
+          keyboards.getMainKeyboard(monitoring.isMonitoringActive(userId)),
+        );
+      } catch (sendError) {
+        console.error(
+          "Error sending monthly stats error message:",
+          sendError,
+        );
+      }
     }
   });
 });

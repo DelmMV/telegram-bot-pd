@@ -1,10 +1,57 @@
 const axios = require('axios');
-const { API_URL } = require('./config');
+const config = require('./config');
 
 const api = axios.create({
-    baseURL: API_URL,
-    timeout: 5000
+    baseURL: config.API_URL,
+    timeout: config.API_TIMEOUT_MS
 });
+
+const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
+const RETRYABLE_CODES = new Set([
+    'ECONNABORTED',
+    'ETIMEDOUT',
+    'ECONNRESET',
+    'EAI_AGAIN',
+    'ENOTFOUND',
+    'ECONNREFUSED',
+    'ENETUNREACH'
+]);
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const getRetryDelay = (attempt) => {
+    const baseDelay = config.API_RETRY_BASE_DELAY_MS;
+    const maxDelay = config.API_RETRY_MAX_DELAY_MS;
+    const delay = Math.min(maxDelay, baseDelay * 2 ** (attempt - 1));
+    return delay + Math.floor(Math.random() * 100);
+};
+
+const isRetryableError = (error) => {
+    const status = error?.response?.status;
+    if (status && RETRYABLE_STATUS.has(status)) return true;
+    const code = error?.code;
+    return code && RETRYABLE_CODES.has(code);
+};
+
+async function postWithRetry(payload) {
+    const maxAttempts = Math.max(1, config.API_RETRY_ATTEMPTS);
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+            return await api.post('', payload);
+        } catch (error) {
+            const isLastAttempt = attempt >= maxAttempts;
+            if (isLastAttempt || !isRetryableError(error)) {
+                throw error;
+            }
+            const delay = getRetryDelay(attempt);
+            console.warn(
+                `API request failed (attempt ${attempt}), retrying in ${delay}ms`,
+                error.code || error.message
+            );
+            await sleep(delay);
+        }
+    }
+}
 
 class ApiService {
     isSessionExpired(response) {
@@ -14,7 +61,7 @@ class ApiService {
 
     async authenticate(clientCode, login, password) {
         try {
-            const response = await api.post('', {
+            const response = await postWithRetry({
                 TL_Mobile_LoginRequest: {
                     ClientCode: clientCode,
                     DeviceInfo: "Telegram Bot Device",
@@ -46,7 +93,7 @@ class ApiService {
 
     async getRoutes(sessionId, date, credentials) {
         try {
-            const response = await api.post('', {
+            const response = await postWithRetry({
                 TL_Mobile_EnumRoutesRequest: {
                     Date: date,
                     SessionId: sessionId
@@ -62,7 +109,7 @@ class ApiService {
                 const newSessionId = await this.refreshSession(credentials);
                 
                 // Повторяем запрос с новым sessionId
-                const newResponse = await api.post('', {
+                const newResponse = await postWithRetry({
                     TL_Mobile_EnumRoutesRequest: {
                         Date: date,
                         SessionId: newSessionId
@@ -91,7 +138,7 @@ class ApiService {
 
     async getRouteDetails(sessionId, routeIds, credentials) {
         try {
-            const response = await api.post('', {
+            const response = await postWithRetry({
                 TL_Mobile_GetRoutesRequest: {
                     Routes: routeIds,
                     SessionId: sessionId,
@@ -106,7 +153,7 @@ class ApiService {
 
                 const newSessionId = await this.refreshSession(credentials);
                 
-                const newResponse = await api.post('', {
+                const newResponse = await postWithRetry({
                     TL_Mobile_GetRoutesRequest: {
                         Routes: routeIds,
                         SessionId: newSessionId,
@@ -136,7 +183,7 @@ class ApiService {
     
     async getOrderDetails(sessionId, orderIds, credentials) {
         try {
-            const response = await api.post('', {
+            const response = await postWithRetry({
                 TL_Mobile_GetOrdersRequest: {
                     Orders: orderIds,
                     SessionId: sessionId
@@ -150,7 +197,7 @@ class ApiService {
     
                 const newSessionId = await this.refreshSession(credentials);
                 
-                const newResponse = await api.post('', {
+                const newResponse = await postWithRetry({
                     TL_Mobile_GetOrdersRequest: {
                         Orders: orderIds,
                         SessionId: newSessionId
