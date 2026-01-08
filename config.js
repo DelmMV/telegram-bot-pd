@@ -26,6 +26,16 @@ module.exports = {
     process.env.TELEGRAM_RETRY_MAX_DELAY_MS || "5000",
     10,
   ),
+  ADMIN_USER_IDS: (process.env.ADMIN_USER_IDS || process.env.ADMIN_USER_ID || "")
+    .split(",")
+    .map((id) => id.trim())
+    .filter(Boolean)
+    .map((id) => Number(id))
+    .filter((id) => Number.isFinite(id)),
+  BROADCAST_DELAY_MS: parseInt(
+    process.env.BROADCAST_DELAY_MS || "100",
+    10,
+  ),
   DB_PATH: "sessions.db",
   MAX_MESSAGE_LENGTH: 4096,
   DATE_FORMAT: "DD.MM.YYYY",

@@ -64,6 +64,54 @@ async function sendTelegramMessage(chatId, text, options) {
   }
 }
 
+const adminUserIds = new Set(config.ADMIN_USER_IDS);
+const isAdminUser = (userId) =>
+  adminUserIds.size > 0 && adminUserIds.has(userId);
+
+const parseBroadcastText = (text) =>
+  text
+    .replace(/^\/(?:broadcast|br)(?:@\w+)?\s*/i, "")
+    .trim();
+
+async function broadcastMessage(adminId, messageText) {
+  const userIds = await db.getAllUserIds();
+  const total = userIds.length;
+
+  if (total === 0) {
+    await sendTelegramMessage(adminId, "Нет пользователей для рассылки.");
+    return;
+  }
+
+  await sendTelegramMessage(
+    adminId,
+    `📣 Начинаю рассылку для пользователей: ${total}`,
+  );
+
+  let sent = 0;
+  let failed = 0;
+
+  for (const userId of userIds) {
+    try {
+      await sendTelegramMessage(userId, messageText, {
+        disable_web_page_preview: true,
+      });
+      sent += 1;
+    } catch (error) {
+      failed += 1;
+      console.error(`Broadcast failed for user ${userId}:`, error);
+    }
+
+    if (config.BROADCAST_DELAY_MS > 0) {
+      await sleep(config.BROADCAST_DELAY_MS);
+    }
+  }
+
+  await sendTelegramMessage(
+    adminId,
+    `✅ Рассылка завершена. Успешно: ${sent}, ошибок: ${failed}.`,
+  );
+}
+
 const ORDER_STATES = {
   "51e45c11-d5c7-4383-8fc4-a2e2e1781230": "Отменён",
   "dfab6563-55b8-475d-aac5-01b6705265cd": "Новый",
@@ -1102,6 +1150,48 @@ bot.command("status", async (ctx) => {
     `Мониторинг: ${isMonitoringActive ? "✅ Активен" : "❌ Не активен"}`;
 
   await ctx.reply(statusMessage, keyboards.getMainKeyboard(isMonitoringActive));
+});
+
+bot.command(["broadcast", "br"], async (ctx) => {
+  const userId = ctx.from.id;
+
+  if (adminUserIds.size === 0) {
+    return await ctx.reply(
+      "Администратор не настроен. Укажите ADMIN_USER_IDS в окружении.",
+    );
+  }
+
+  if (!isAdminUser(userId)) {
+    return await ctx.reply("❌ Недостаточно прав для рассылки");
+  }
+
+  const rawText = ctx.message?.text || "";
+  const messageText = parseBroadcastText(rawText);
+
+  if (!messageText) {
+    return await ctx.reply("Использование: /broadcast <текст>");
+  }
+
+  if (messageText.length > config.MAX_MESSAGE_LENGTH) {
+    return await ctx.reply(
+      `Сообщение слишком длинное. Лимит: ${config.MAX_MESSAGE_LENGTH} символов.`,
+    );
+  }
+
+  await ctx.reply("📣 Рассылка запущена. Отчет пришлю по завершению.");
+
+  setImmediate(async () => {
+    try {
+      await broadcastMessage(userId, messageText);
+    } catch (error) {
+      console.error("Broadcast error:", error);
+      try {
+        await sendTelegramMessage(userId, "❌ Ошибка при рассылке.");
+      } catch (sendError) {
+        console.error("Error sending broadcast failure:", sendError);
+      }
+    }
+  });
 });
 
 bot.command("logout", async (ctx) => {

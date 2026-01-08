@@ -104,10 +104,24 @@ class Database {
   }
 
   /**
+   * Получает список всех ID пользователей
+   * @returns {Promise<number[]>}
+   */
+  async getAllUserIds() {
+    return new Promise((resolve, reject) => {
+      this.db.all("SELECT user_id FROM sessions", [], (err, rows) => {
+        if (err) reject(err);
+        else resolve(rows.map((row) => row.user_id));
+      });
+    });
+  }
+
+  /**
    * Удаляет сессию пользователя
-   * @param {number} userId - ID пользователя Telegram
+   * @param {number} userId - ID пользователя
    * @returns {Promise<void>}
    */
+
   async deleteSession(userId) {
     this.sessionCache.delete(userId);
     return new Promise((resolve, reject) => {
