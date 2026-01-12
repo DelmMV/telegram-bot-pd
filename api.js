@@ -22,8 +22,10 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const getRetryDelay = (attempt) => {
     const baseDelay = config.API_RETRY_BASE_DELAY_MS;
     const maxDelay = config.API_RETRY_MAX_DELAY_MS;
+    // Экспоненциальный бекофф с jitter (рандомизация)
     const delay = Math.min(maxDelay, baseDelay * 2 ** (attempt - 1));
-    return delay + Math.floor(Math.random() * 100);
+    const jitter = Math.random() * 0.3 * delay; // 0-30% jitter
+    return Math.floor(delay + jitter);
 };
 
 const isRetryableError = (error) => {

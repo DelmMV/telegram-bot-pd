@@ -4,8 +4,8 @@ module.exports = {
   TELEGRAM_TOKEN: process.env.TELEGRAM_TOKEN,
   INTERVAL_UPDATES: parseInt(process.env.INTERVAL_UPDATES || "60000", 10),
   API_URL: "http://vrp.logdep.ru/dl/storage",
-  API_TIMEOUT_MS: parseInt(process.env.API_TIMEOUT_MS || "15000", 10),
-  API_RETRY_ATTEMPTS: parseInt(process.env.API_RETRY_ATTEMPTS || "3", 10),
+  API_TIMEOUT_MS: parseInt(process.env.API_TIMEOUT_MS || "30000", 10),
+  API_RETRY_ATTEMPTS: parseInt(process.env.API_RETRY_ATTEMPTS || "5", 10),
   API_RETRY_BASE_DELAY_MS: parseInt(
     process.env.API_RETRY_BASE_DELAY_MS || "750",
     10,
@@ -15,7 +15,7 @@ module.exports = {
     10,
   ),
   TELEGRAM_RETRY_ATTEMPTS: parseInt(
-    process.env.TELEGRAM_RETRY_ATTEMPTS || "3",
+    process.env.TELEGRAM_RETRY_ATTEMPTS || "5",
     10,
   ),
   TELEGRAM_RETRY_BASE_DELAY_MS: parseInt(
@@ -59,7 +59,7 @@ module.exports = {
     url:
       process.env.ROUTING_API_URL ||
       "https://router.project-osrm.org/route/v1/driving",
-    timeout: parseInt(process.env.ROUTING_API_TIMEOUT || "8000", 10),
+    timeout: parseInt(process.env.ROUTING_API_TIMEOUT || "15000", 10),
   },
   // Тарифная сетка для расчета заработка
   // Согласно EARNINGS_CALCULATION_FIX.md:

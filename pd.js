@@ -23,6 +23,44 @@ const RETRYABLE_TELEGRAM_CODES = new Set([
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// Безопасная обработка callback-запросов с таймаутом и обработкой ошибок
+const safeCallback = async (ctx, handler, timeoutMs = 85000) => {
+  const timeoutPromise = new Promise((_, reject) => {
+    setTimeout(() => reject(new Error('Callback timeout')), timeoutMs);
+  });
+  
+  try {
+    await Promise.race([handler(ctx), timeoutPromise]);
+    await ctx.answerCbQuery().catch(() => {}); // Всегда отвечаем на callback
+  } catch (error) {
+    console.error(`Callback error (${ctx.callbackQuery?.data}):`, error);
+    
+    // Пытаемся ответить на callback, чтобы избежать "постоянных загрузок"
+    await ctx.answerCbQuery('❌ Ошибка обработки').catch(() => {});
+    
+    // Уведомляем пользователя
+    try {
+      await ctx.reply('⚠️ Произошла ошибка при обработке запроса. Попробуйте позже.');
+    } catch (replyError) {
+      console.error('Failed to send error message:', replyError);
+    }
+    
+    // Логируем для админа (если есть)
+    const adminUserIds = new Set(config.ADMIN_USER_IDS);
+    if (adminUserIds.size > 0 && !adminUserIds.has(ctx.from?.id)) {
+      const adminId = Array.from(adminUserIds)[0];
+      try {
+        await sendTelegramMessage(
+          adminId,
+          `⚠️ Ошибка callback: ${ctx.callbackQuery?.data}\nUser: ${ctx.from?.id}\nError: ${error.message}`
+        );
+      } catch (e) {
+        console.error('Failed to notify admin:', e);
+      }
+    }
+  }
+};
+
 const getTelegramRetryDelay = (attempt, error) => {
   const retryAfter =
     error?.parameters?.retry_after || error?.response?.parameters?.retry_after;
@@ -31,8 +69,10 @@ const getTelegramRetryDelay = (attempt, error) => {
   }
   const baseDelay = config.TELEGRAM_RETRY_BASE_DELAY_MS;
   const maxDelay = config.TELEGRAM_RETRY_MAX_DELAY_MS;
+  // Экспоненциальный бекофф с jitter (рандомизация)
   const delay = Math.min(maxDelay, baseDelay * 2 ** (attempt - 1));
-  return delay + Math.floor(Math.random() * 100);
+  const jitter = Math.random() * 0.3 * delay; // 0-30% jitter
+  return Math.floor(delay + jitter);
 };
 
 const isRetryableTelegramError = (error) => {
@@ -182,7 +222,13 @@ async function checkNewOrders(userId, sessionId, allowReentry = false) {
 
     let activeSessionId = session?.session_id || sessionId;
     const currentDate = new Date().toLocaleDateString("ru-RU");
-    const result = await api.getRoutes(activeSessionId, currentDate, credentials);
+    // Таймаут 45 секунд для проверки новых заказов
+    const result = await Promise.race([
+      api.getRoutes(activeSessionId, currentDate, credentials),
+      new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Проверка заказов заняла слишком много времени')), 45000)
+      )
+    ]);
 
     if (result.sessionUpdated) {
       session.session_id = result.newSessionId;
@@ -402,6 +448,23 @@ async function checkNewOrders(userId, sessionId, allowReentry = false) {
         }
         monitoring.stopMonitoring(userId);
       }
+    } else if (error.message && error.message.includes('таймаут')) {
+      console.warn(`Timeout in monitoring for user ${userId}, continuing...`);
+      // Не останавливаем мониторинг при таймауте, просто пропускаем цикл
+    } else if (error.code === 'ECONNRESET' || error.code === 'ECONNREFUSED') {
+      console.warn(`Network error in monitoring for user ${userId}, continuing...`);
+      // Не останавливаем мониторинг при сетевых ошибках
+    } else {
+      // При других ошибках останавливаем мониторинг
+      try {
+        await sendTelegramMessage(
+          userId,
+          "⚠️ Мониторинг остановлен из-за ошибки. Запустите заново через меню.",
+        );
+      } catch (sendError) {
+        console.error("Error sending monitoring stop message:", sendError);
+      }
+      monitoring.stopMonitoring(userId);
     }
   } finally {
     if (!allowReentry) {
@@ -423,7 +486,13 @@ async function showRoutes(ctx, date) {
       password: session.password,
     };
 
-    const result = await api.getRoutes(session.session_id, date, credentials);
+    // Таймаут 60 секунд для получения маршрутов
+    const result = await Promise.race([
+      api.getRoutes(session.session_id, date, credentials),
+      new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Получение маршрутов заняло слишком много времени')), 60000)
+      )
+    ]);
 
     if (result.sessionUpdated) {
       session.session_id = result.newSessionId;
@@ -455,11 +524,12 @@ async function showRoutes(ctx, date) {
     }
 
     for (const route of routes) {
-      const detailsResult = await api.getRouteDetails(
-        session.session_id,
-        [route.Id],
-        credentials,
-      );
+      const detailsResult = await Promise.race([
+        api.getRouteDetails(session.session_id, [route.Id], credentials),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Получение деталей маршрута заняло слишком много времени')), 30000)
+        )
+      ]);
 
       if (detailsResult.sessionUpdated) {
         session.session_id = detailsResult.newSessionId;
@@ -473,13 +543,14 @@ async function showRoutes(ctx, date) {
         (point) => point.Orders?.map((order) => order.Id) || [],
       ).filter((id) => id);
 
-      const orderDetailsResult = await api.getOrderDetails(
-        session.session_id,
-        orderIds,
-        credentials,
-      );
-      if (orderDetailsResult.sessionUpdated) {
-        session.session_id = orderDetailsResult.newSessionId;
+      const orderDetailsResult = await Promise.race([
+        api.getOrderDetails(session.session_id, orderIds, credentials),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Получение деталей заказов заняло слишком много времени')), 30000)
+        )
+      ]);
+      if (detailsResult.sessionUpdated) {
+        session.session_id = detailsResult.newSessionId;
         await db.saveSession(ctx.from.id, session);
       }
 
@@ -624,8 +695,12 @@ async function showRoutes(ctx, date) {
           "Ошибка обновления сессии. Пожалуйста, авторизуйтесь заново через /start",
         );
       }
+    } else if (error.message && error.message.includes('таймаут')) {
+      await ctx.reply("⏱️ Превышено время ожидания ответа от сервера. Попробуйте позже.");
+    } else if (error.code === 'ECONNRESET' || error.code === 'ECONNREFUSED') {
+      await ctx.reply("🔌 Проблемы с сетным соединением. Попробуйте позже.");
     } else {
-      await ctx.reply("❌ Произошла ошибка при получении маршрутов");
+      await ctx.reply("❌ Произошла ошибка при получении маршрутов. Попробуйте позже.");
     }
   }
 }
@@ -643,7 +718,13 @@ async function showActiveRoutes(ctx, date) {
       password: session.password,
     };
 
-    const result = await api.getRoutes(session.session_id, date, credentials);
+    // Таймаут 60 секунд для получения активных маршрутов
+    const result = await Promise.race([
+      api.getRoutes(session.session_id, date, credentials),
+      new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Получение активных маршрутов заняло слишком много времени')), 60000)
+      )
+    ]);
 
     if (result.sessionUpdated) {
       session.session_id = result.newSessionId;
@@ -684,11 +765,12 @@ async function showActiveRoutes(ctx, date) {
     let activeRoutesFound = false;
 
     for (const route of routes) {
-      const detailsResult = await api.getRouteDetails(
-        session.session_id,
-        [route.Id],
-        credentials,
-      );
+      const detailsResult = await Promise.race([
+        api.getRouteDetails(session.session_id, [route.Id], credentials),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Получение деталей маршрута заняло слишком много времени')), 30000)
+        )
+      ]);
 
       if (detailsResult.sessionUpdated) {
         session.session_id = detailsResult.newSessionId;
@@ -701,13 +783,14 @@ async function showActiveRoutes(ctx, date) {
         (point) => point.Orders?.map((order) => order.Id) || [],
       ).filter((id) => id);
 
-      const orderDetailsResult = await api.getOrderDetails(
-        session.session_id,
-        orderIds,
-        credentials,
-      );
-      if (orderDetailsResult.sessionUpdated) {
-        session.session_id = orderDetailsResult.newSessionId;
+      const orderDetailsResult = await Promise.race([
+        api.getOrderDetails(session.session_id, orderIds, credentials),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Получение деталей заказов заняло слишком много времени')), 30000)
+        )
+      ]);
+      if (detailsResult.sessionUpdated) {
+        session.session_id = detailsResult.newSessionId;
         await db.saveSession(ctx.from.id, session);
       }
 
@@ -879,8 +962,12 @@ async function showActiveRoutes(ctx, date) {
           "Ошибка обновления сессии. Пожалуйста, авторизуйтесь заново через /start",
         );
       }
+    } else if (error.message && error.message.includes('таймаут')) {
+      await ctx.reply("⏱️ Превышено время ожидания ответа от сервера. Попробуйте позже.");
+    } else if (error.code === 'ECONNRESET' || error.code === 'ECONNREFUSED') {
+      await ctx.reply("🔌 Проблемы с сетным соединением. Попробуйте позже.");
     } else {
-      await ctx.reply("❌ Произошла ошибка при получении активных маршрутов");
+      await ctx.reply("❌ Произошла ошибка при получении активных маршрутов. Попробуйте позже.");
     }
   }
 }
@@ -898,7 +985,13 @@ async function showStatistics(ctx, date) {
       password: session.password,
     };
 
-    const result = await api.getRoutes(session.session_id, date, credentials);
+    // Таймаут 60 секунд для получения статистики
+    const result = await Promise.race([
+      api.getRoutes(session.session_id, date, credentials),
+      new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Получение статистики заняло слишком много времени')), 60000)
+      )
+    ]);
 
     if (result.sessionUpdated) {
       session.session_id = result.newSessionId;
@@ -928,11 +1021,12 @@ async function showStatistics(ctx, date) {
     let orderDetails = [];
 
     for (const route of routes) {
-      const detailsResult = await api.getRouteDetails(
-        session.session_id,
-        [route.Id],
-        credentials,
-      );
+      const detailsResult = await Promise.race([
+        api.getRouteDetails(session.session_id, [route.Id], credentials),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Получение деталей маршрута заняло слишком много времени')), 30000)
+        )
+      ]);
 
       if (detailsResult.sessionUpdated) {
         session.session_id = detailsResult.newSessionId;
@@ -951,13 +1045,14 @@ async function showStatistics(ctx, date) {
         ),
       );
 
-      const orderDetailsResult = await api.getOrderDetails(
-        session.session_id,
-        orderIds,
-        credentials,
-      );
-      if (orderDetailsResult.sessionUpdated) {
-        session.session_id = orderDetailsResult.newSessionId;
+      const orderDetailsResult = await Promise.race([
+        api.getOrderDetails(session.session_id, orderIds, credentials),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Получение деталей заказов заняло слишком много времени')), 30000)
+        )
+      ]);
+      if (detailsResult.sessionUpdated) {
+        session.session_id = detailsResult.newSessionId;
         await db.saveSession(ctx.from.id, session);
       }
 
@@ -1106,8 +1201,12 @@ async function showStatistics(ctx, date) {
           "Ошибка обновления сессии. Пожалуйста, авторизуйтесь заново через /start",
         );
       }
+    } else if (error.message && error.message.includes('таймаут')) {
+      await ctx.reply("⏱️ Превышено время ожидания ответа от сервера. Попробуйте позже.");
+    } else if (error.code === 'ECONNRESET' || error.code === 'ECONNREFUSED') {
+      await ctx.reply("🔌 Проблемы с сетным соединением. Попробуйте позже.");
     } else {
-      await ctx.reply("❌ Произошла ошибка при получении статистики");
+      await ctx.reply("❌ Произошла ошибка при получении статистики. Попробуйте позже.");
     }
   }
 }
@@ -1241,8 +1340,71 @@ bot.command("logout", async (ctx) => {
 
 // Обработка действий с кнопками
 bot.action("routes_today", async (ctx) => {
-  const currentDate = new Date().toLocaleDateString("ru-RU");
-  await showRoutes(ctx, currentDate);
+  await safeCallback(ctx, async (ctx) => {
+    const currentDate = new Date().toLocaleDateString("ru-RU");
+    await showRoutes(ctx, currentDate);
+  });
+});
+
+bot.action("routes_tomorrow", async (ctx) => {
+  await safeCallback(ctx, async (ctx) => {
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    const tomorrowDate = tomorrow.toLocaleDateString("ru-RU");
+    await showRoutes(ctx, tomorrowDate);
+  });
+});
+
+bot.action("routes_active", async (ctx) => {
+  await safeCallback(ctx, async (ctx) => {
+    const currentDate = new Date().toLocaleDateString("ru-RU");
+    await showActiveRoutes(ctx, currentDate);
+  });
+});
+
+bot.action("routes_select_date", async (ctx) => {
+  await safeCallback(ctx, async (ctx) => {
+    const session = await db.getSession(ctx.from.id);
+    if (!session?.session_id) {
+      return await ctx.reply("Вы не авторизованы", keyboards.getLoginKeyboard);
+    }
+
+    await ctx.reply(
+      "Введите дату в формате ДД.ММ.ГГГГ (например, 09.02.2024):",
+      keyboards.getMainKeyboard(monitoring.isMonitoringActive(ctx.from.id)),
+    );
+
+    await db.saveSession(ctx.from.id, {
+      ...session,
+      step: config.STEPS.AWAITING_DATE,
+    });
+  });
+});
+
+bot.action("stats_today", async (ctx) => {
+  await safeCallback(ctx, async (ctx) => {
+    const currentDate = new Date().toLocaleDateString("ru-RU");
+    await showStatistics(ctx, currentDate);
+  });
+});
+
+bot.action("stats_select_date", async (ctx) => {
+  await safeCallback(ctx, async (ctx) => {
+    const session = await db.getSession(ctx.from.id);
+    if (!session?.session_id) {
+      return await ctx.reply("Вы не авторизованы", keyboards.getLoginKeyboard);
+    }
+
+    await ctx.reply(
+      "Введите дату в формате ДД.ММ.ГГГГ (например, 09.02.2024):",
+      keyboards.getMainKeyboard(monitoring.isMonitoringActive(ctx.from.id)),
+    );
+
+    await db.saveSession(ctx.from.id, {
+      ...session,
+      step: config.STEPS.AWAITING_DATE,
+    });
+  });
 });
 
 bot.action("routes_tomorrow", async (ctx) => {
@@ -1594,14 +1756,14 @@ bot.on("text", async (ctx) => {
 
 // Обработчики инлайн кнопок для отчетов
 bot.action("report_time_8_30_21", async (ctx) => {
-  const userId = ctx.from.id;
-  const session = await db.getSession(userId);
-  if (!session?.session_id) {
-    return await ctx.reply("Вы не авторизованы", keyboards.getLoginKeyboard);
-  }
+  await safeCallback(ctx, async (ctx) => {
+    const userId = ctx.from.id;
+    const session = await db.getSession(userId);
+    if (!session?.session_id) {
+      return await ctx.reply("Вы не авторизованы", keyboards.getLoginKeyboard);
+    }
 
-  const timeText = "8.30-21.00";
-  try {
+    const timeText = "8.30-21.00";
     const currentDate = new Date().toLocaleDateString("ru-RU");
     const workHours = calculateWorkHours(timeText);
     const driverSurname = getDriverSurname(session.driver_name);
@@ -1620,21 +1782,18 @@ bot.action("report_time_8_30_21", async (ctx) => {
       ...session,
       step: config.STEPS.AUTHENTICATED,
     });
-  } catch (error) {
-    console.error("Error creating report:", error);
-    await ctx.reply("❌ Произошла ошибка при создании отчета");
-  }
+  });
 });
 
 bot.action("report_time_9_21", async (ctx) => {
-  const userId = ctx.from.id;
-  const session = await db.getSession(userId);
-  if (!session?.session_id) {
-    return await ctx.reply("Вы не авторизованы", keyboards.getLoginKeyboard);
-  }
+  await safeCallback(ctx, async (ctx) => {
+    const userId = ctx.from.id;
+    const session = await db.getSession(userId);
+    if (!session?.session_id) {
+      return await ctx.reply("Вы не авторизованы", keyboards.getLoginKeyboard);
+    }
 
-  const timeText = "9.00-21.00";
-  try {
+    const timeText = "9.00-21.00";
     const currentDate = new Date().toLocaleDateString("ru-RU");
     const workHours = calculateWorkHours(timeText);
     const driverSurname = getDriverSurname(session.driver_name);
@@ -1653,331 +1812,445 @@ bot.action("report_time_9_21", async (ctx) => {
       ...session,
       step: config.STEPS.AUTHENTICATED,
     });
-  } catch (error) {
-    console.error("Error creating report:", error);
-    await ctx.reply("❌ Произошла ошибка при создании отчета");
-  }
+  });
 });
 
 bot.action("report_custom_time", async (ctx) => {
-  const userId = ctx.from.id;
-  const session = await db.getSession(userId);
-  if (!session?.session_id) {
-    return await ctx.reply("Вы не авторизованы", keyboards.getLoginKeyboard);
-  }
+  await safeCallback(ctx, async (ctx) => {
+    const userId = ctx.from.id;
+    const session = await db.getSession(userId);
+    if (!session?.session_id) {
+      return await ctx.reply("Вы не авторизованы", keyboards.getLoginKeyboard);
+    }
 
-  await ctx.reply('Введите время работы в формате "9.30-21.00":');
-  // Session step already set to AWAITING_WORK_TIME in the main handler
+    await ctx.reply('Введите время работы в формате "9.30-21.00":');
+    // Session step already set to AWAITING_WORK_TIME in the main handler
+  });
 });
 
 // Обработчики месячной статистики
 bot.action("monthly_stats_current", async (ctx) => {
-  await ctx.answerCbQuery();
-  const userId = ctx.from.id;
-  const chatId = ctx.chat.id;
-  const session = await db.getSession(userId);
+  await safeCallback(ctx, async (ctx) => {
+    await ctx.answerCbQuery();
+    const userId = ctx.from.id;
+    const chatId = ctx.chat.id;
+    const session = await db.getSession(userId);
 
-  if (!session?.session_id) {
-    return await ctx.reply("Вы не авторизованы", keyboards.getLoginKeyboard);
-  }
+    if (!session?.session_id) {
+      return await ctx.reply("Вы не авторизованы", keyboards.getLoginKeyboard);
+    }
 
-  const now = new Date();
-  const month = now.getMonth() + 1;
-  const year = now.getFullYear();
+    const now = new Date();
+    const month = now.getMonth() + 1;
+    const year = now.getFullYear();
 
-  // Отправляем начальное сообщение и запускаем сбор статистики в фоне
-  await ctx.reply(
-    "⏳ Собираю статистику за текущий месяц...\nЭто может занять несколько минут.\n\n" +
-      "Вы можете продолжить работу с ботом, результат будет отправлен автоматически.",
-  );
+    // Отправляем начальное сообщение и запускаем сбор статистики в фоне
+    await ctx.reply(
+      "⏳ Собираю статистику за текущий месяц...\nЭто может занять несколько минут.\n\n" +
+        "Вы можете продолжить работу с ботом, результат будет отправлен автоматически.",
+    );
 
-  // Запускаем асинхронную обработку без блокировки callback
-  setImmediate(async () => {
-    let progressMessage;
-    try {
-      const stats = await monthlyStats.collectMonthlyStatistics(
-        userId,
-        month,
-        year,
-        async (processed, total) => {
-          if (processed % 5 === 0 || processed === total) {
-            const progressText = `📊 Обработано дней: ${processed}/${total}`;
-            if (progressMessage) {
-              try {
-                await bot.telegram.editMessageText(
-                  chatId,
-                  progressMessage.message_id,
-                  null,
-                  progressText,
-                );
-              } catch (error) {
-                // Игнорируем ошибки редактирования
-              }
-            } else {
-              try {
-                progressMessage = await sendTelegramMessage(
-                  chatId,
-                  progressText,
-                );
-              } catch (sendError) {
-                console.error(
-                  "Error sending monthly stats progress message:",
-                  sendError,
-                );
+    // Запускаем асинхронную обработку без блокировки callback
+    setImmediate(async () => {
+      let progressMessage;
+      try {
+        const stats = await monthlyStats.collectMonthlyStatistics(
+          userId,
+          month,
+          year,
+          async (processed, total) => {
+            if (processed % 5 === 0 || processed === total) {
+              const progressText = `📊 Обработано дней: ${processed}/${total}`;
+              if (progressMessage) {
+                try {
+                  await bot.telegram.editMessageText(
+                    chatId,
+                    progressMessage.message_id,
+                    null,
+                    progressText,
+                  );
+                } catch (error) {
+                  // Игнорируем ошибки редактирования
+                }
+              } else {
+                try {
+                  progressMessage = await sendTelegramMessage(
+                    chatId,
+                    progressText,
+                  );
+                } catch (sendError) {
+                  console.error(
+                    "Error sending monthly stats progress message:",
+                    sendError,
+                  );
+                }
               }
             }
-          }
-        },
-      );
+          },
+        );
 
-      const message = monthlyStats.formatMonthlyStats(stats, month, year);
-      await sendTelegramMessage(
-        chatId,
-        message,
-        keyboards.getMainKeyboard(monitoring.isMonitoringActive(userId)),
-      );
-    } catch (error) {
-      console.error("Error getting monthly statistics:", error);
-      try {
+        const message = monthlyStats.formatMonthlyStats(stats, month, year);
         await sendTelegramMessage(
           chatId,
-          "❌ Ошибка при сборе статистики",
+          message,
           keyboards.getMainKeyboard(monitoring.isMonitoringActive(userId)),
         );
-      } catch (sendError) {
-        console.error(
-          "Error sending monthly stats error message:",
-          sendError,
-        );
+      } catch (error) {
+        console.error("Error getting monthly statistics:", error);
+        try {
+          await sendTelegramMessage(
+            chatId,
+            "❌ Ошибка при сборе статистики",
+            keyboards.getMainKeyboard(monitoring.isMonitoringActive(userId)),
+          );
+        } catch (sendError) {
+          console.error(
+            "Error sending monthly stats error message:",
+            sendError,
+          );
+        }
       }
-    }
+    });
   });
 });
 
 bot.action("monthly_stats_previous", async (ctx) => {
-  await ctx.answerCbQuery();
-  const userId = ctx.from.id;
-  const chatId = ctx.chat.id;
-  const session = await db.getSession(userId);
+  await safeCallback(ctx, async (ctx) => {
+    await ctx.answerCbQuery();
+    const userId = ctx.from.id;
+    const chatId = ctx.chat.id;
+    const session = await db.getSession(userId);
 
-  if (!session?.session_id) {
-    return await ctx.reply("Вы не авторизованы", keyboards.getLoginKeyboard);
-  }
+    if (!session?.session_id) {
+      return await ctx.reply("Вы не авторизованы", keyboards.getLoginKeyboard);
+    }
 
-  const now = new Date();
-  now.setMonth(now.getMonth() - 1);
-  const month = now.getMonth() + 1;
-  const year = now.getFullYear();
+    const now = new Date();
+    now.setMonth(now.getMonth() - 1);
+    const month = now.getMonth() + 1;
+    const year = now.getFullYear();
 
-  // Отправляем начальное сообщение и запускаем сбор статистики в фоне
-  await ctx.reply(
-    "⏳ Собираю статистику за прошлый месяц...\nЭто может занять несколько минут.\n\n" +
-      "Вы можете продолжить работу с ботом, результат будет отправлен автоматически.",
-  );
+    // Отправляем начальное сообщение и запускаем сбор статистики в фоне
+    await ctx.reply(
+      "⏳ Собираю статистику за прошлый месяц...\nЭто может занять несколько минут.\n\n" +
+        "Вы можете продолжить работу с ботом, результат будет отправлен автоматически.",
+    );
 
-  // Запускаем асинхронную обработку без блокировки callback
-  setImmediate(async () => {
-    let progressMessage;
-    try {
-      const stats = await monthlyStats.collectMonthlyStatistics(
-        userId,
-        month,
-        year,
-        async (processed, total) => {
-          if (processed % 5 === 0 || processed === total) {
-            const progressText = `📊 Обработано дней: ${processed}/${total}`;
-            if (progressMessage) {
-              try {
-                await bot.telegram.editMessageText(
-                  chatId,
-                  progressMessage.message_id,
-                  null,
-                  progressText,
-                );
-              } catch (error) {
-                // Игнорируем ошибки редактирования
-              }
-            } else {
-              try {
-                progressMessage = await sendTelegramMessage(
-                  chatId,
-                  progressText,
-                );
-              } catch (sendError) {
-                console.error(
-                  "Error sending monthly stats progress message:",
-                  sendError,
-                );
+    // Запускаем асинхронную обработку без блокировки callback
+    setImmediate(async () => {
+      let progressMessage;
+      try {
+        const stats = await monthlyStats.collectMonthlyStatistics(
+          userId,
+          month,
+          year,
+          async (processed, total) => {
+            if (processed % 5 === 0 || processed === total) {
+              const progressText = `📊 Обработано дней: ${processed}/${total}`;
+              if (progressMessage) {
+                try {
+                  await bot.telegram.editMessageText(
+                    chatId,
+                    progressMessage.message_id,
+                    null,
+                    progressText,
+                  );
+                } catch (error) {
+                  // Игнорируем ошибки редактирования
+                }
+              } else {
+                try {
+                  progressMessage = await sendTelegramMessage(
+                    chatId,
+                    progressText,
+                  );
+                } catch (sendError) {
+                  console.error(
+                    "Error sending monthly stats progress message:",
+                    sendError,
+                  );
+                }
               }
             }
-          }
-        },
-      );
+          },
+        );
 
-      const message = monthlyStats.formatMonthlyStats(stats, month, year);
-      await sendTelegramMessage(
-        chatId,
-        message,
-        keyboards.getMainKeyboard(monitoring.isMonitoringActive(userId)),
-      );
-    } catch (error) {
-      console.error("Error getting monthly statistics:", error);
-      try {
+        const message = monthlyStats.formatMonthlyStats(stats, month, year);
         await sendTelegramMessage(
           chatId,
-          "❌ Ошибка при сборе статистики",
+          message,
           keyboards.getMainKeyboard(monitoring.isMonitoringActive(userId)),
         );
-      } catch (sendError) {
-        console.error(
-          "Error sending monthly stats error message:",
-          sendError,
-        );
+      } catch (error) {
+        console.error("Error getting monthly statistics:", error);
+        try {
+          await sendTelegramMessage(
+            chatId,
+            "❌ Ошибка при сборе статистики",
+            keyboards.getMainKeyboard(monitoring.isMonitoringActive(userId)),
+          );
+        } catch (sendError) {
+          console.error(
+            "Error sending monthly stats error message:",
+            sendError,
+          );
+        }
       }
-    }
+    });
   });
 });
 
 bot.action("monthly_stats_select", async (ctx) => {
-  await ctx.answerCbQuery();
-  const session = await db.getSession(ctx.from.id);
+  await safeCallback(ctx, async (ctx) => {
+    await ctx.answerCbQuery();
+    const session = await db.getSession(ctx.from.id);
 
-  if (!session?.session_id) {
-    return await ctx.reply("Вы не авторизованы", keyboards.getLoginKeyboard);
-  }
+    if (!session?.session_id) {
+      return await ctx.reply("Вы не авторизованы", keyboards.getLoginKeyboard);
+    }
 
-  await ctx.editMessageText(
-    "Выберите год:",
-    keyboards.getYearSelectionKeyboard(),
-  );
+    await ctx.editMessageText(
+      "Выберите год:",
+      keyboards.getYearSelectionKeyboard(),
+    );
+  });
 });
 
 bot.action(/^year_select_(\d+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
-  const year = parseInt(ctx.match[1]);
+  await safeCallback(ctx, async (ctx) => {
+    await ctx.answerCbQuery();
+    const year = parseInt(ctx.match[1]);
 
-  await ctx.editMessageText(
-    `Выберите месяц (${year}):`,
-    keyboards.getMonthSelectionKeyboard(year),
-  );
+    await ctx.editMessageText(
+      `Выберите месяц (${year}):`,
+      keyboards.getMonthSelectionKeyboard(year),
+    );
+  });
 });
 
 bot.action(/^month_select_(\d+)_(\d+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
-  const month = parseInt(ctx.match[1]);
-  const year = parseInt(ctx.match[2]);
-  const userId = ctx.from.id;
-  const chatId = ctx.chat.id;
-  const session = await db.getSession(userId);
+  await safeCallback(ctx, async (ctx) => {
+    await ctx.answerCbQuery();
+    const month = parseInt(ctx.match[1]);
+    const year = parseInt(ctx.match[2]);
+    const userId = ctx.from.id;
+    const chatId = ctx.chat.id;
+    const session = await db.getSession(userId);
 
-  if (!session?.session_id) {
-    return await ctx.reply("Вы не авторизованы", keyboards.getLoginKeyboard);
-  }
+    if (!session?.session_id) {
+      return await ctx.reply("Вы не авторизованы", keyboards.getLoginKeyboard);
+    }
 
-  const monthNames = [
-    "Январь",
-    "Февраль",
-    "Март",
-    "Апрель",
-    "Май",
-    "Июнь",
-    "Июль",
-    "Август",
-    "Сентябрь",
-    "Октябрь",
-    "Ноябрь",
-    "Декабрь",
-  ];
+    const monthNames = [
+      "Январь",
+      "Февраль",
+      "Март",
+      "Апрель",
+      "Май",
+      "Июнь",
+      "Июль",
+      "Август",
+      "Сентябрь",
+      "Октябрь",
+      "Ноябрь",
+      "Декабрь",
+    ];
 
-  // Отправляем начальное сообщение и запускаем сбор статистики в фоне
-  await ctx.reply(
-    `⏳ Собираю статистику за ${monthNames[month - 1]} ${year}...\nЭто может занять несколько минут.\n\n` +
-      "Вы можете продолжить работу с ботом, результат будет отправлен автоматически.",
-  );
+    // Отправляем начальное сообщение и запускаем сбор статистики в фоне
+    await ctx.reply(
+      `⏳ Собираю статистику за ${monthNames[month - 1]} ${year}...\nЭто может занять несколько минут.\n\n` +
+        "Вы можете продолжить работу с ботом, результат будет отправлен автоматически.",
+    );
 
-  // Запускаем асинхронную обработку без блокировки callback
-  setImmediate(async () => {
-    let progressMessage;
-    try {
-      const stats = await monthlyStats.collectMonthlyStatistics(
-        userId,
-        month,
-        year,
-        async (processed, total) => {
-          if (processed % 5 === 0 || processed === total) {
-            const progressText = `📊 Обработано дней: ${processed}/${total}`;
-            if (progressMessage) {
-              try {
-                await bot.telegram.editMessageText(
-                  chatId,
-                  progressMessage.message_id,
-                  null,
-                  progressText,
-                );
-              } catch (error) {
-                // Игнорируем ошибки редактирования
-              }
-            } else {
-              try {
-                progressMessage = await sendTelegramMessage(
-                  chatId,
-                  progressText,
-                );
-              } catch (sendError) {
-                console.error(
-                  "Error sending monthly stats progress message:",
-                  sendError,
-                );
+    // Запускаем асинхронную обработку без блокировки callback
+    setImmediate(async () => {
+      let progressMessage;
+      try {
+        const stats = await monthlyStats.collectMonthlyStatistics(
+          userId,
+          month,
+          year,
+          async (processed, total) => {
+            if (processed % 5 === 0 || processed === total) {
+              const progressText = `📊 Обработано дней: ${processed}/${total}`;
+              if (progressMessage) {
+                try {
+                  await bot.telegram.editMessageText(
+                    chatId,
+                    progressMessage.message_id,
+                    null,
+                    progressText,
+                  );
+                } catch (error) {
+                  // Игнорируем ошибки редактирования
+                }
+              } else {
+                try {
+                  progressMessage = await sendTelegramMessage(
+                    chatId,
+                    progressText,
+                  );
+                } catch (sendError) {
+                  console.error(
+                    "Error sending monthly stats progress message:",
+                    sendError,
+                  );
+                }
               }
             }
-          }
-        },
-      );
+          },
+        );
 
-      const message = monthlyStats.formatMonthlyStats(stats, month, year);
-      await sendTelegramMessage(
-        chatId,
-        message,
-        keyboards.getMainKeyboard(monitoring.isMonitoringActive(userId)),
-      );
-    } catch (error) {
-      console.error("Error getting monthly statistics:", error);
-      try {
+        const message = monthlyStats.formatMonthlyStats(stats, month, year);
         await sendTelegramMessage(
           chatId,
-          "❌ Ошибка при сборе статистики",
+          message,
           keyboards.getMainKeyboard(monitoring.isMonitoringActive(userId)),
         );
-      } catch (sendError) {
-        console.error(
-          "Error sending monthly stats error message:",
-          sendError,
-        );
+      } catch (error) {
+        console.error("Error getting monthly statistics:", error);
+        try {
+          await sendTelegramMessage(
+            chatId,
+            "❌ Ошибка при сборе статистики",
+            keyboards.getMainKeyboard(monitoring.isMonitoringActive(userId)),
+          );
+        } catch (sendError) {
+          console.error(
+            "Error sending monthly stats error message:",
+            sendError,
+          );
+        }
       }
-    }
+    });
   });
 });
 
 bot.action("monthly_stats_back", async (ctx) => {
-  await ctx.answerCbQuery();
-  await ctx.editMessageText(
-    "Выберите период для статистики:",
-    keyboards.getMonthlyStatsKeyboard,
-  );
+  await safeCallback(ctx, async (ctx) => {
+    await ctx.answerCbQuery();
+    await ctx.editMessageText(
+      "Выберите период для статистики:",
+      keyboards.getMonthlyStatsKeyboard,
+    );
+  });
 });
 
-bot.launch();
+// Обертка для запуска бота с обработкой ошибок
+async function startBot() {
+  try {
+    console.log("🚀 Запуск бота...");
+    await bot.launch();
+    console.log("✅ Бот успешно запущен");
+    
+    // Автоматический перезапуск при ошибках соединения
+    bot.catch(async (error) => {
+      console.error("❌ Ошибка Telegraf:", error);
+      
+      // Пытаемся уведомить админов
+      const adminUserIds = new Set(config.ADMIN_USER_IDS);
+      if (adminUserIds.size > 0) {
+        for (const adminId of adminUserIds) {
+          try {
+            await sendTelegramMessage(
+              adminId,
+              `⚠️ Бот столкнулся с ошибкой:\n${error.message}\n\nПопытка автоматического перезапуска...`
+            );
+          } catch (e) {
+            console.error("Failed to notify admin:", e);
+          }
+        }
+      }
+      
+      // Если ошибка критическая - перезапускаем через 30 секунд
+      if (error.message?.includes('network') || error.message?.includes('timeout')) {
+        console.log("🔄 Перезапуск бота через 30 секунд...");
+        setTimeout(() => {
+          console.log("🔄 Перезапускаем бота...");
+          startBot().catch(console.error);
+        }, 30000);
+      }
+    });
+    
+  } catch (error) {
+    console.error("❌ Критическая ошибка при запуске бота:", error);
+    
+    // Пытаемся уведомить админов
+    const adminUserIds = new Set(config.ADMIN_USER_IDS);
+    if (adminUserIds.size > 0) {
+      for (const adminId of adminUserIds) {
+        try {
+          await sendTelegramMessage(
+            adminId,
+            `🚨 КРИТИЧЕСКАЯ ОШИБКА ЗАПУСКА БОТА:\n${error.message}\n\nБот остановлен. Требуется ручное вмешательство.`
+          );
+        } catch (e) {
+          console.error("Failed to notify admin:", e);
+        }
+      }
+    }
+    
+    // Перезапуск через 60 секунд
+    console.log("🔄 Перезапуск бота через 60 секунд...");
+    setTimeout(() => {
+      console.log("🔄 Попытка перезапуска...");
+      startBot().catch(console.error);
+    }, 60000);
+  }
+}
+
+// Запускаем бота
+startBot();
 
 process.once("SIGINT", () => {
+  console.log("🛑 Получен SIGINT, останавливаем бота...");
   bot.stop("SIGINT");
   db.close();
+  process.exit(0);
+});
+
+process.once("SIGTERM", () => {
+  console.log("🛑 Получен SIGTERM, останавливаем бота...");
+  bot.stop("SIGTERM");
+  db.close();
+  process.exit(0);
 });
 
 process.on("uncaughtException", (error) => {
-  console.error("Uncaught Exception:", error);
+  console.error("❌ Uncaught Exception:", error);
+  console.error("Stack:", error.stack);
+  
+  // Пытаемся уведомить админов
+  const adminUserIds = new Set(config.ADMIN_USER_IDS);
+  if (adminUserIds.size > 0) {
+    const adminId = Array.from(adminUserIds)[0];
+    sendTelegramMessage(
+      adminId,
+      `🚨 Uncaught Exception:\n${error.message}\n\n${error.stack?.substring(0, 500)}`
+    ).catch(() => {});
+  }
+  
+  // Не выходим сразу, даем шанс на восстановление
+  setTimeout(() => {
+    console.log("🔄 Попытка восстановления после uncaught exception...");
+    startBot().catch(console.error);
+  }, 30000);
 });
 
 process.on("unhandledRejection", (reason, promise) => {
-  console.error("Unhandled Rejection at:", promise, "reason:", reason);
+  console.error("❌ Unhandled Rejection at:", promise);
+  console.error("Reason:", reason);
+  
+  // Пытаемся уведомить админов
+  const adminUserIds = new Set(config.ADMIN_USER_IDS);
+  if (adminUserIds.size > 0) {
+    const adminId = Array.from(adminUserIds)[0];
+    const reasonStr = typeof reason === 'object' ? JSON.stringify(reason, Object.getOwnPropertyNames(reason)) : String(reason);
+    sendTelegramMessage(
+      adminId,
+      `🚨 Unhandled Rejection:\n${reasonStr.substring(0, 500)}`
+    ).catch(() => {});
+  }
 });
+
 module.exports = { bot };
