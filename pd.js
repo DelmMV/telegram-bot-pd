@@ -396,9 +396,6 @@ const startShiftReportScheduler = () => {
       if (!session?.session_id) {
         continue;
       }
-      if (!isReportChannelEnabled(session)) {
-        continue;
-      }
 
       try {
         await sendTelegramMessage(
@@ -2091,11 +2088,7 @@ bot.on("text", async (ctx) => {
           keyboards.getLoginKeyboard,
         );
       }
-      if (!isReportChannelEnabled(session)) {
-        return await ctx.reply(
-          "Отчет отключен. Пожалуйста, подключите Telegram и выберите канал для отчетов в Профиле.",
-        );
-      }
+      // Show time selection keyboard regardless of channel status
       await ctx.reply(
         'Выберите время работы или введите вручную в формате "9.30-21.00":',
         keyboards.getReportKeyboard,
@@ -2274,14 +2267,6 @@ bot.on("text", async (ctx) => {
 
   // Обработка ввода времени для отчета
   if (session?.step === config.STEPS.AWAITING_WORK_TIME) {
-    if (!isReportChannelEnabled(session)) {
-      await ctx.reply("Отчет отключен в профиле.");
-      await db.saveSession(userId, {
-        ...session,
-        step: config.STEPS.AUTHENTICATED,
-      });
-      return;
-    }
     const timeRegex = /^\d{1,2}\.\d{2}-\d{1,2}\.\d{2}$/;
     if (!timeRegex.test(text)) {
       return await ctx.reply(
@@ -2388,12 +2373,6 @@ bot.action("report_time_8_30_21", async (ctx) => {
     if (!session?.session_id) {
       return await ctx.reply("Вы не авторизованы", keyboards.getLoginKeyboard);
     }
-    if (!isReportChannelEnabled(session)) {
-      return await ctx.reply("Отчет отключен в профиле.");
-    }
-    if (!isReportChannelEnabled(session)) {
-      return await ctx.reply("Отчет отключен в профиле.");
-    }
 
     const timeText = "8.30-21.00";
     const currentDate = new Date().toLocaleDateString("ru-RU");
@@ -2426,10 +2405,6 @@ bot.action("report_time_9_21", async (ctx) => {
     if (!session?.session_id) {
       return await ctx.reply("Вы не авторизованы", keyboards.getLoginKeyboard);
     }
-    if (!isReportChannelEnabled(session)) {
-      return await ctx.reply("Отчет отключен в профиле.");
-    }
-
     const timeText = "9.00-21.00";
     const currentDate = new Date().toLocaleDateString("ru-RU");
     const workHours = calculateWorkHours(timeText);
