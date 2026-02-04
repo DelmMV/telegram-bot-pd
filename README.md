@@ -72,6 +72,63 @@ TELEGRAM_TOKEN=your_telegram_bot_token
 INTERVAL_UPDATES=30000
 ```
 
+Полный список поддерживаемых переменных окружения:
+
+```env
+# Telegram Bot API
+TELEGRAM_TOKEN=your_telegram_bot_token # токен Bot API
+ADMIN_USER_IDS=123,456 # список админов через запятую
+ADMIN_USER_ID=123 # одиночный админ (legacy)
+BROADCAST_DELAY_MS=100 # задержка между сообщениями рассылки (мс)
+
+# Telegram user client (GramJS)
+TG_API_ID=123456 # api_id Telegram приложения
+TG_API_HASH=your_api_hash # api_hash Telegram приложения
+TELEGRAM_CONNECT_RETRIES=10 # попытки подключения к DC
+TELEGRAM_REQUEST_RETRIES=5 # повторы RPC запросов
+TELEGRAM_RETRY_DELAY_MS=1000 # базовая задержка повторов (мс)
+TELEGRAM_RETRY_ATTEMPTS=5 # повторы для bot API (sendMessage)
+TELEGRAM_RETRY_BASE_DELAY_MS=500 # базовая задержка bot API (мс)
+TELEGRAM_RETRY_MAX_DELAY_MS=5000 # максимум задержки bot API (мс)
+TELEGRAM_TRANSPORT=abridged # transport: abridged/full/obfuscated/websocket/wss
+TELEGRAM_PORT=443 # порт подключения
+TELEGRAM_CLIENT_TTL_MS=1800000 # TTL клиента в кэше (мс)
+TELEGRAM_CLIENT_CLEANUP_MS=300000 # интервал очистки кэша (мс)
+TELEGRAM_KEEPALIVE_MIN_MS=20000 # минимальный интервал keepalive (мс)
+TELEGRAM_KEEPALIVE_MAX_MS=120000 # максимальный интервал keepalive (мс)
+TELEGRAM_KEEPALIVE_BACKOFF_FACTOR=1.6 # фактор снижения интервала при ошибках
+TELEGRAM_KEEPALIVE_RECOVERY_FACTOR=1.3 # фактор роста интервала при успехах
+TELEGRAM_KEEPALIVE_FAILURE_THRESHOLD=3 # порог ошибок для алерта
+TELEGRAM_KEEPALIVE_SUCCESS_THRESHOLD=3 # порог успехов для увеличения интервала
+TELEGRAM_MAX_CONCURRENT_REQUESTS=4 # лимит параллельных Telegram RPC
+TELEGRAM_ERROR_ALERT_THRESHOLD=3 # порог ошибок для предупреждения
+
+# API
+API_URL=http://vrp.logdep.ru/dl/storage # базовый URL внешнего API
+API_TIMEOUT_MS=30000 # таймаут API (мс)
+API_RETRY_ATTEMPTS=5 # количество повторов API
+API_RETRY_BASE_DELAY_MS=750 # базовая задержка повторов (мс)
+API_RETRY_MAX_DELAY_MS=5000 # максимальная задержка повторов (мс)
+
+# Monitoring
+INTERVAL_UPDATES=60000 # интервал опроса обновлений (мс)
+
+# Storage
+DB_PATH=sessions.db # путь к SQLite базе
+
+# Messaging
+MAX_MESSAGE_LENGTH=4096 # лимит длины сообщения
+DATE_FORMAT=DD.MM.YYYY # формат даты
+
+# Routing
+ROUTING_API_URL=https://router.project-osrm.org/route/v1/driving # базовый URL OSRM
+ROUTING_API_TIMEOUT=15000 # таймаут OSRM (мс)
+
+# Start point fallback
+START_POINT_LAT=61.7495506 # latitude точки старта
+START_POINT_LON=34.3627967 # longitude точки старта
+```
+
 4. **Запустите бота**
 ```bash
 npm start

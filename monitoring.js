@@ -1,4 +1,14 @@
 const keyboards = require('./keyboards');
+const db = require('./database');
+
+const isChannelEnabled = (value) =>
+    value === 1 || value === "1" || value === true;
+
+const buildMainKeyboard = async (userId, isMonitoringActive) => {
+    const session = await db.getSession(userId);
+    const showReportButton = isChannelEnabled(session?.tg_report_channel_enabled);
+    return keyboards.getMainKeyboard(isMonitoringActive, { showReportButton });
+};
 
 class MonitoringService {
     constructor() {
@@ -24,10 +34,11 @@ class MonitoringService {
                 this.stopMonitoring(userId);
                 try {
                     const bot = require('./pd').bot;
+                    const mainKeyboard = await buildMainKeyboard(userId, false);
                     await bot.telegram.sendMessage(
                         userId,
                         '🔴 Мониторинг автоматически остановлен',
-                        keyboards.getMainKeyboard(false)
+                        mainKeyboard
                     );
                 } catch (error) {
                     console.error('Error sending monitoring stop notification:', error);
@@ -67,6 +78,10 @@ class MonitoringService {
 
     isMonitoringActive(userId) {
         return this.activeMonitoring.has(userId);
+    }
+
+    getActiveUserIds() {
+        return Array.from(this.activeMonitoring.keys());
     }
 
     updateLastKnownOrders(userId, orders) {

@@ -6,6 +6,8 @@ const keyboards = require("./keyboards");
 const monitoring = require("./monitoring");
 const monthlyStats = require("./monthly-stats");
 const distanceCalculator = require("./distance-calculator");
+const tgClient = require("./tg-client");
+const QRCode = require("qrcode");
 
 const bot = new Telegraf(config.TELEGRAM_TOKEN);
 
@@ -194,9 +196,441 @@ const ORDER_STATES = {
   "50b9348e-1da1-44e3-b84b-88b68da829a4": "Отложен",
 };
 
+const PAID_STATUS_MAP = {
+  "ceb8edd8-a0d9-4116-a8ee-a6c0be89103b": "наличные",
+  "d4535403-e4f6-4888-859e-098b7829b3a6": "терминал",
+  "b107b2e5-fe96-46ec-9c1d-7248d77e8383": "сайт",
+};
+
+const PAID_STATUS_IDS = new Set(Object.keys(PAID_STATUS_MAP));
+
+const orderStatusCache = new Map();
+const pendingPaymentActions = new Map();
+const pendingPaymentChange = new Map();
+const tgChannelLists = new Map();
+const shiftReportSent = new Map();
+let shiftSchedulerStarted = false;
+const qrMessageCache = new Map();
+
 function getOrderStatusName(statusId) {
   return ORDER_STATES[statusId] || "Неизвестный статус";
 }
+
+const getPaymentTypeByStatus = (statusId) => PAID_STATUS_MAP[statusId] || null;
+
+const formatOrderLabel = (externalId) => {
+  if (!externalId) return "Заказ";
+  const value = String(externalId);
+  return value.startsWith("За") ? value : `За${value}`;
+};
+
+const getOrderStatusCache = (userId) => {
+  if (!orderStatusCache.has(userId)) {
+    orderStatusCache.set(userId, new Map());
+  }
+  return orderStatusCache.get(userId);
+};
+
+const getCachedOrderStatus = async (userId, orderId) => {
+  const cache = getOrderStatusCache(userId);
+  if (cache.has(orderId)) {
+    return cache.get(orderId);
+  }
+  const status = await db.getOrderStatus(userId, orderId);
+  cache.set(orderId, status);
+  return status;
+};
+
+const setCachedOrderStatus = async (userId, orderId, statusId) => {
+  const cache = getOrderStatusCache(userId);
+  cache.set(orderId, statusId);
+  await db.saveOrderStatus(userId, orderId, statusId);
+};
+
+const hasTelegramSession = (session) => Boolean(session?.tg_session);
+
+const isChannelEnabled = (value) =>
+  value === 1 || value === "1" || value === true;
+
+const getOrderChannelState = (session) => ({
+  id: session?.tg_order_channel_id,
+  accessHash: session?.tg_order_channel_access_hash,
+  title: session?.tg_order_channel_title,
+  enabled: isChannelEnabled(session?.tg_order_channel_enabled),
+});
+
+const getReportChannelState = (session) => ({
+  id: session?.tg_report_channel_id,
+  accessHash: session?.tg_report_channel_access_hash,
+  title: session?.tg_report_channel_title,
+  enabled: isChannelEnabled(session?.tg_report_channel_enabled),
+});
+
+const isOrderChannelConfigured = (session) => {
+  const channel = getOrderChannelState(session);
+  return Boolean(channel.id && channel.accessHash);
+};
+
+const isReportChannelConfigured = (session) => {
+  const channel = getReportChannelState(session);
+  return Boolean(channel.id && channel.accessHash);
+};
+
+const isOrderChannelEnabled = (session) => {
+  const channel = getOrderChannelState(session);
+  return channel.enabled && Boolean(channel.id && channel.accessHash);
+};
+
+const isReportChannelEnabled = (session) => {
+  const channel = getReportChannelState(session);
+  return channel.enabled && Boolean(channel.id && channel.accessHash);
+};
+
+const buildPaymentMessage = (externalId, paymentType) =>
+  `${formatOrderLabel(externalId)} ${paymentType}`;
+
+const buildPaymentChangeMessage = (externalId, oldType, newType) =>
+  `${formatOrderLabel(externalId)} смена оплаты с ${oldType} на ${newType}`;
+
+const normalizePaymentType = (text) => {
+  const value = (text || "").toLowerCase().trim();
+  if (["нал", "наличные", "кэш", "cash"].includes(value)) return "наличные";
+  if (["терминал", "безнал", "карта", "card"].includes(value))
+    return "терминал";
+  if (["сайт", "online", "онлайн"].includes(value)) return "сайт";
+  return null;
+};
+
+const getPaymentActionKey = (userId, orderId) => `${userId}:${orderId}`;
+
+const getMainKeyboardForSession = (session, isMonitoringActive) =>
+  keyboards.getMainKeyboard(isMonitoringActive, {
+    showReportButton: isReportChannelEnabled(session),
+  });
+
+const scheduleAutoSend = async (userId, orderId, externalId, paymentType) => {
+  const key = getPaymentActionKey(userId, orderId);
+  if (pendingPaymentActions.has(key)) {
+    return;
+  }
+
+  const timeoutId = setTimeout(async () => {
+    const pending = pendingPaymentActions.get(key);
+    if (!pending) return;
+
+    try {
+      const session = await db.getSession(userId);
+      if (!isOrderChannelEnabled(session)) {
+        pendingPaymentActions.delete(key);
+        return;
+      }
+
+      const channel = getOrderChannelState(session);
+      await tgClient.sendChannelMessage(
+        userId,
+        channel.id,
+        channel.accessHash,
+        buildPaymentMessage(externalId, paymentType),
+      );
+    } catch (error) {
+      console.error("Auto send to channel failed:", error);
+    } finally {
+      pendingPaymentActions.delete(key);
+    }
+  }, 2 * 60 * 1000);
+
+  pendingPaymentActions.set(key, {
+    userId,
+    orderId,
+    externalId,
+    paymentType,
+    timeoutId,
+  });
+};
+
+const clearPendingPaymentAction = (userId, orderId) => {
+  const key = getPaymentActionKey(userId, orderId);
+  const pending = pendingPaymentActions.get(key);
+  if (pending?.timeoutId) {
+    clearTimeout(pending.timeoutId);
+  }
+  pendingPaymentActions.delete(key);
+};
+
+const notifyPaidStatus = async (userId, externalId, paymentType, orderId) => {
+  const key = getPaymentActionKey(userId, orderId);
+  if (pendingPaymentActions.has(key)) {
+    return;
+  }
+  const session = await db.getSession(userId);
+  if (!hasTelegramSession(session) || !isOrderChannelEnabled(session)) {
+    return;
+  }
+
+  await sendTelegramMessage(
+    userId,
+    `${formatOrderLabel(externalId)} оплата ${paymentType}.`,
+    keyboards.getPaymentActionKeyboard(orderId),
+  );
+  await scheduleAutoSend(userId, orderId, externalId, paymentType);
+};
+
+const startShiftReportScheduler = () => {
+  if (shiftSchedulerStarted) {
+    return;
+  }
+  shiftSchedulerStarted = true;
+  setInterval(async () => {
+    const now = new Date();
+    if (now.getHours() !== 21 || now.getMinutes() !== 5) {
+      return;
+    }
+
+    const dateKey = now.toLocaleDateString("ru-RU");
+    const activeUserIds = monitoring.getActiveUserIds();
+    for (const userId of activeUserIds) {
+      if (shiftReportSent.get(userId) === dateKey) {
+        continue;
+      }
+      const session = await db.getSession(userId);
+      if (!session?.session_id) {
+        continue;
+      }
+      if (!isReportChannelEnabled(session)) {
+        continue;
+      }
+
+      try {
+        await sendTelegramMessage(
+          userId,
+          '📝 Создать отчет. Выберите время работы или введите вручную в формате "9.30-21.00":',
+          keyboards.getReportKeyboard,
+        );
+        await db.saveSession(userId, {
+          ...session,
+          step: config.STEPS.AWAITING_WORK_TIME,
+        });
+        shiftReportSent.set(userId, dateKey);
+      } catch (error) {
+        console.error("Failed to send end-of-shift report prompt:", error);
+      }
+    }
+  }, 60 * 1000);
+};
+
+const sendQrMessage = async (userId, qrToken, expiresAt) => {
+  const loginUrl = `tg://login?token=${qrToken.toString("base64url")}`;
+  const buffer = await QRCode.toBuffer(loginUrl, {
+    type: "png",
+    margin: 1,
+    scale: 8,
+  });
+
+  let expiresIn = null;
+  if (expiresAt) {
+    const expiresMs = expiresAt < 1e12 ? expiresAt * 1000 : expiresAt;
+    expiresIn = Math.max(0, Math.round((expiresMs - Date.now()) / 1000));
+  }
+  const caption =
+    "🔐 Отсканируйте QR в приложении Telegram" +
+    (expiresIn ? `\n⏳ Действует ${expiresIn} сек.` : "");
+
+  const previous = qrMessageCache.get(userId);
+  const sent = await bot.telegram.sendPhoto(
+    userId,
+    { source: buffer },
+    { caption, reply_markup: keyboards.getQrLoginKeyboard.reply_markup },
+  );
+
+  if (previous?.messageId) {
+    try {
+      await bot.telegram.deleteMessage(userId, previous.messageId);
+    } catch (error) {
+      console.warn("Failed to delete previous QR message:", error.message);
+    }
+  }
+
+  qrMessageCache.set(userId, { messageId: sent.message_id });
+};
+
+const clearQrMessage = async (userId) => {
+  const previous = qrMessageCache.get(userId);
+  if (previous?.messageId) {
+    try {
+      await bot.telegram.deleteMessage(userId, previous.messageId);
+    } catch (error) {
+      console.warn("Failed to delete QR message:", error.message);
+    }
+  }
+  qrMessageCache.delete(userId);
+};
+
+const sendReportToChannel = async (userId, session, reportMessage) => {
+  if (!hasTelegramSession(session) || !isReportChannelEnabled(session)) {
+    return;
+  }
+
+  const channel = getReportChannelState(session);
+  try {
+    await tgClient.sendChannelMessage(
+      userId,
+      channel.id,
+      channel.accessHash,
+      reportMessage,
+    );
+  } catch (error) {
+    console.error("Failed to send report to channel:", error);
+  }
+};
+
+const startQrLoginFlow = async (ctx) => {
+  const session = await db.getSession(ctx.from.id);
+  if (!session?.session_id) {
+    await ctx.reply("Вы не авторизованы", keyboards.getLoginKeyboard);
+    return;
+  }
+  if (hasTelegramSession(session)) {
+    await ctx.reply("Telegram уже подключен.");
+    return;
+  }
+
+  await ctx.reply("📷 Подключение через QR. Сейчас пришлю код для сканирования.");
+  try {
+    const startResult = await tgClient.startTelegramQrLogin(ctx.from.id, {
+      notifyQr: async (code) => {
+        await sendQrMessage(ctx.from.id, code.token, code.expires);
+      },
+      notifyPassword: async () => {
+        await sendTelegramMessage(
+          ctx.from.id,
+          "🔐 Введите пароль 2FA для Telegram:",
+        );
+        const currentSession = await db.getSession(ctx.from.id);
+        await db.saveSession(ctx.from.id, {
+          ...currentSession,
+          step: config.STEPS.TG_PASSWORD,
+        });
+      },
+      notifySuccess: async () => {
+        await clearQrMessage(ctx.from.id);
+        await sendTelegramMessage(
+          ctx.from.id,
+          "✅ Telegram подключен. Теперь выберите канал в профиле.",
+        );
+        const currentSession = await db.getSession(ctx.from.id);
+        await db.saveSession(ctx.from.id, {
+          ...currentSession,
+          step: config.STEPS.AUTHENTICATED,
+        });
+      },
+      notifyError: async () => {
+        await clearQrMessage(ctx.from.id);
+        await sendTelegramMessage(
+          ctx.from.id,
+          "❌ Не удалось подключить Telegram. Повторите /tg.",
+        );
+        const currentSession = await db.getSession(ctx.from.id);
+        await db.saveSession(ctx.from.id, {
+          ...currentSession,
+          step: config.STEPS.AUTHENTICATED,
+        });
+      },
+    });
+
+    if (!startResult.started) {
+      await ctx.reply("⚠️ Подключение уже выполняется.");
+    }
+  } catch (error) {
+    console.error("Telegram QR login error:", error);
+    await ctx.reply("❌ Не удалось создать QR. Проверьте TG_API_ID/TG_API_HASH.");
+  }
+};
+
+const handlePaymentTypeSelection = async (ctx, paymentType) => {
+  const userId = ctx.from.id;
+  const pending = pendingPaymentChange.get(userId);
+  if (!pending) {
+    return await ctx.reply("⏱️ Запрос устарел. Ожидайте нового уведомления.");
+  }
+
+  const updatedSession = await db.getSession(userId);
+  if (!isOrderChannelEnabled(updatedSession)) {
+    await ctx.reply("Канал заказов отключен. Откройте профиль.");
+    await db.saveSession(userId, {
+      ...updatedSession,
+      step: config.STEPS.AUTHENTICATED,
+    });
+    pendingPaymentChange.delete(userId);
+    return;
+  }
+
+  try {
+    const channel = getOrderChannelState(updatedSession);
+    await tgClient.sendChannelMessage(
+      userId,
+      channel.id,
+      channel.accessHash,
+      buildPaymentChangeMessage(
+        pending.externalId,
+        pending.oldPaymentType,
+        paymentType,
+      ),
+    );
+    await ctx.reply("✅ Отправлено изменение оплаты в канал");
+  } catch (error) {
+    console.error("Failed to send payment change:", error);
+    await ctx.reply("❌ Не удалось отправить изменение оплаты");
+  } finally {
+    pendingPaymentChange.delete(userId);
+    await db.saveSession(userId, {
+      ...updatedSession,
+      step: config.STEPS.AUTHENTICATED,
+    });
+  }
+};
+
+const startChannelSelection = async (ctx, mode) => {
+  const userId = ctx.from.id;
+  const session = await db.getSession(userId);
+  if (!session?.session_id) {
+    return await ctx.reply("Вы не авторизованы", keyboards.getLoginKeyboard);
+  }
+  if (!hasTelegramSession(session)) {
+    return await ctx.reply(
+      "Сначала подключите Telegram через профиль или /tg.",
+    );
+  }
+
+  let channels;
+  try {
+    channels = await tgClient.listUserChannels(userId);
+  } catch (error) {
+    console.error("Failed to load Telegram channels:", error);
+    return await ctx.reply("❌ Не удалось получить список каналов.");
+  }
+
+  if (channels.length === 0) {
+    return await ctx.reply("Не нашел доступных каналов в вашем Telegram.");
+  }
+
+  tgChannelLists.set(userId, {
+    channels,
+    page: 0,
+    mode,
+  });
+
+  const pageSize = 8;
+  const page = 0;
+  const pageChannels = channels.slice(0, pageSize);
+  const keyboard = keyboards.getChannelSelectionKeyboard(
+    pageChannels,
+    page,
+    channels.length,
+    pageSize,
+  );
+
+  await ctx.reply("Выберите канал:", keyboard);
+};
 
 async function checkNewOrders(userId, sessionId, allowReentry = false) {
   if (!allowReentry && inFlightChecks.has(userId)) {
@@ -251,169 +685,193 @@ async function checkNewOrders(userId, sessionId, allowReentry = false) {
       (order) => !previousOrders.has(order),
     );
 
-    if (newOrders.length) {
-      for (const route of routes) {
-        const routeOrders =
-          route.Orders?.map((order) => order.ExternalId) || [];
-        const hasNewOrders = routeOrders.some((orderId) =>
-          newOrders.includes(orderId),
-        );
+    for (const route of routes) {
+      const routeOrders =
+        route.Orders?.map((order) => order.ExternalId) || [];
+      const hasNewOrders = routeOrders.some((orderId) =>
+        newOrders.includes(orderId),
+      );
 
-        if (hasNewOrders) {
-          const detailsResult = await api.getRouteDetails(
-            activeSessionId,
-            [route.Id],
-            credentials,
-          );
+      const detailsResult = await api.getRouteDetails(
+        activeSessionId,
+        [route.Id],
+        credentials,
+      );
 
-          if (detailsResult.sessionUpdated) {
-            session.session_id = detailsResult.newSessionId;
-            await db.saveSession(userId, session);
-            activeSessionId = detailsResult.newSessionId;
+      if (detailsResult.sessionUpdated) {
+        session.session_id = detailsResult.newSessionId;
+        await db.saveSession(userId, session);
+        activeSessionId = detailsResult.newSessionId;
+      }
+
+      const routeDetails =
+        detailsResult.data.TL_Mobile_GetRoutesResponse.Routes[0];
+
+      const orderIds = routeDetails.Points.flatMap(
+        (point) => point.Orders?.map((order) => order.Id) || [],
+      ).filter((id) => id);
+
+      if (orderIds.length === 0) {
+        continue;
+      }
+
+      const orderDetailsResult = await api.getOrderDetails(
+        activeSessionId,
+        orderIds,
+        credentials,
+      );
+      if (orderDetailsResult.sessionUpdated) {
+        session.session_id = orderDetailsResult.newSessionId;
+        await db.saveSession(userId, session);
+        activeSessionId = orderDetailsResult.newSessionId;
+      }
+
+      const orders =
+        orderDetailsResult.data.TL_Mobile_GetOrdersResponse.Orders;
+
+      const orderExternalMap = new Map();
+      for (const point of routeDetails.Points) {
+        for (const pointOrder of point.Orders || []) {
+          if (pointOrder?.Id) {
+            orderExternalMap.set(pointOrder.Id, pointOrder.ExternalId);
           }
+        }
+      }
 
-          const routeDetails =
-            detailsResult.data.TL_Mobile_GetRoutesResponse.Routes[0];
+      if (hasNewOrders) {
+        let messageText = `🆕 Новые заказы в маршруте ${routeDetails.Number}:\n\n`;
 
-          // Получаем orderIds для детальной информации
-          const orderIds = routeDetails.Points.flatMap(
-            (point) => point.Orders?.map((order) => order.Id) || [],
-          ).filter((id) => id);
+        for (let i = 1; i < routeDetails.Points.length; i++) {
+          const point = routeDetails.Points[i];
+          const pointOrder = point.Orders?.[0];
 
-          // Получаем детальную информацию о заказах
-          const orderDetailsResult = await api.getOrderDetails(
-            activeSessionId,
-            orderIds,
-            credentials,
-          );
-          if (orderDetailsResult.sessionUpdated) {
-            session.session_id = orderDetailsResult.newSessionId;
-            await db.saveSession(userId, session);
-            activeSessionId = orderDetailsResult.newSessionId;
-          }
+          if (pointOrder && newOrders.includes(pointOrder.ExternalId)) {
+            const orderDetails = orders.find((o) => o.Id === pointOrder.Id);
+            messageText += `📦 Заказ: ${pointOrder.ExternalId}\n`;
 
-          const orders =
-            orderDetailsResult.data.TL_Mobile_GetOrdersResponse.Orders;
+            const encodedAddress = encodeURIComponent(point.Address);
+            messageText += `📮 Адрес: <a href="https://yandex.ru/maps/?text=${encodedAddress}">${point.Address}</a>\n`;
+            messageText += `🧭 <a href="yandexnavi://map_search?text=${encodedAddress}">Открыть в навигаторе</a>\n`;
 
-          let messageText = `🆕 Новые заказы в маршруте ${routeDetails.Number}:\n\n`;
-
-          for (let i = 1; i < routeDetails.Points.length; i++) {
-            const point = routeDetails.Points[i];
-            const pointOrder = point.Orders?.[0];
-
-            if (pointOrder && newOrders.includes(pointOrder.ExternalId)) {
-              const orderDetails = orders.find((o) => o.Id === pointOrder.Id);
-              messageText += `📦 Заказ: ${pointOrder.ExternalId}\n`;
-
-              // Создаем кликабельную ссылку на карту с адресом
-              const encodedAddress = encodeURIComponent(point.Address);
-              messageText += `📮 Адрес: <a href="https://yandex.ru/maps/?text=${encodedAddress}">${point.Address}</a>\n`;
-              messageText += `🧭 <a href="yandexnavi://map_search?text=${encodedAddress}">Открыть в навигаторе</a>\n`;
-
-              if (point.Description) {
-                messageText += `👤 Получатель: ${point.Description}\n`;
-              }
-
-              if (orderDetails?.To?.ContactPhone) {
-                messageText += `📱 Телефон: ${orderDetails.To.ContactPhone}\n`;
-              }
-
-              if (point.Weight) {
-                messageText += `⚖️ Вес: ${point.Weight} ${routeDetails.WeightUnit}\n`;
-              }
-
-              if (orderDetails?.InvoiceTotal) {
-                messageText += `💰 Стоимость: ${orderDetails.InvoiceTotal} руб.\n`;
-              }
-
-              if (orderDetails?.Comment) {
-                messageText += `📝 Комментарий: ${orderDetails.Comment}\n`;
-              }
-
-              // Добавляем информацию о временном окне доставки, если она есть
-              if (orderDetails?.To?.StartTime && orderDetails?.To?.EndTime) {
-                const startTime = new Date(
-                  orderDetails.To.StartTime,
-                ).toLocaleTimeString("ru-RU", {
-                  hour: "2-digit",
-                  minute: "2-digit",
-                });
-                const endTime = new Date(
-                  orderDetails.To.EndTime,
-                ).toLocaleTimeString("ru-RU", {
-                  hour: "2-digit",
-                  minute: "2-digit",
-                });
-                messageText += `⏰ Временное окно: ${startTime} - ${endTime}\n`;
-              }
-
-              messageText += `\n`;
+            if (point.Description) {
+              messageText += `👤 Получатель: ${point.Description}\n`;
             }
+
+            if (orderDetails?.To?.ContactPhone) {
+              messageText += `📱 Телефон: ${orderDetails.To.ContactPhone}\n`;
+            }
+
+            if (point.Weight) {
+              messageText += `⚖️ Вес: ${point.Weight} ${routeDetails.WeightUnit}\n`;
+            }
+
+            if (orderDetails?.InvoiceTotal) {
+              messageText += `💰 Стоимость: ${orderDetails.InvoiceTotal} руб.\n`;
+            }
+
+            if (orderDetails?.Comment) {
+              messageText += `📝 Комментарий: ${orderDetails.Comment}\n`;
+            }
+
+            if (orderDetails?.To?.StartTime && orderDetails?.To?.EndTime) {
+              const startTime = new Date(
+                orderDetails.To.StartTime,
+              ).toLocaleTimeString("ru-RU", {
+                hour: "2-digit",
+                minute: "2-digit",
+              });
+              const endTime = new Date(
+                orderDetails.To.EndTime,
+              ).toLocaleTimeString("ru-RU", {
+                hour: "2-digit",
+                minute: "2-digit",
+              });
+              messageText += `⏰ Временное окно: ${startTime} - ${endTime}\n`;
+            }
+
+            messageText += `\n`;
           }
+        }
 
-          // Отправляем сообщение с учетом ограничения длины
-          if (messageText.length > config.MAX_MESSAGE_LENGTH) {
-            // Модифицированный алгоритм разбиения сообщения, чтобы не разрывать HTML-теги
-            let position = 0;
-            while (position < messageText.length) {
-              let endPosition = position + config.MAX_MESSAGE_LENGTH;
+        if (messageText.length > config.MAX_MESSAGE_LENGTH) {
+          let position = 0;
+          while (position < messageText.length) {
+            let endPosition = position + config.MAX_MESSAGE_LENGTH;
 
-              // Если мы не в конце сообщения, найдем безопасную точку для разрыва
-              if (endPosition < messageText.length) {
-                // Ищем последний перевод строки перед лимитом
-                const lastNewLine = messageText.lastIndexOf("\n", endPosition);
-                if (lastNewLine > position) {
-                  endPosition = lastNewLine + 1; // +1 чтобы включить символ переноса строки
-                } else {
-                  // Если нет переноса строки, убедимся что не разрываем HTML-тег
-                  let openTagIndex = messageText.lastIndexOf(
-                    "<a href=",
-                    endPosition,
+            if (endPosition < messageText.length) {
+              const lastNewLine = messageText.lastIndexOf("\n", endPosition);
+              if (lastNewLine > position) {
+                endPosition = lastNewLine + 1;
+              } else {
+                let openTagIndex = messageText.lastIndexOf(
+                  "<a href=",
+                  endPosition,
+                );
+                let closeTagIndex = messageText.lastIndexOf(
+                  "</a>",
+                  endPosition,
+                );
+
+                if (openTagIndex > closeTagIndex) {
+                  const safeBreak = messageText.lastIndexOf(
+                    "\n",
+                    openTagIndex,
                   );
-                  let closeTagIndex = messageText.lastIndexOf(
-                    "</a>",
-                    endPosition,
-                  );
-
-                  // Если открывающий тег находится перед закрывающим, значит тег не закрыт
-                  if (openTagIndex > closeTagIndex) {
-                    // Найдем предыдущий перенос строки перед открывающим тегом
-                    const safeBreak = messageText.lastIndexOf(
-                      "\n",
-                      openTagIndex,
-                    );
-                    if (safeBreak > position) {
-                      endPosition = safeBreak + 1;
-                    }
+                  if (safeBreak > position) {
+                    endPosition = safeBreak + 1;
                   }
                 }
               }
-
-              try {
-                await sendTelegramMessage(
-                  userId,
-                  messageText.slice(position, endPosition),
-                  {
-                    parse_mode: "HTML",
-                    disable_web_page_preview: true,
-                  },
-                );
-              } catch (sendError) {
-                console.error("Error sending order notification:", sendError);
-                break;
-              }
-
-              position = endPosition;
             }
-          } else {
+
             try {
-              await sendTelegramMessage(userId, messageText, {
-                parse_mode: "HTML",
-                disable_web_page_preview: true,
-              });
+              await sendTelegramMessage(
+                userId,
+                messageText.slice(position, endPosition),
+                {
+                  parse_mode: "HTML",
+                  disable_web_page_preview: true,
+                },
+              );
             } catch (sendError) {
               console.error("Error sending order notification:", sendError);
+              break;
             }
+
+            position = endPosition;
+          }
+        } else {
+          try {
+            await sendTelegramMessage(userId, messageText, {
+              parse_mode: "HTML",
+              disable_web_page_preview: true,
+            });
+          } catch (sendError) {
+            console.error("Error sending order notification:", sendError);
+          }
+        }
+      }
+
+      for (const order of orders) {
+        if (!order?.Id || !order.CustomState) {
+          continue;
+        }
+        const currentStatus = order.CustomState;
+        const previousStatus = await getCachedOrderStatus(userId, order.Id);
+        await setCachedOrderStatus(userId, order.Id, currentStatus);
+
+        if (!previousStatus) {
+          continue;
+        }
+
+        if (
+          PAID_STATUS_IDS.has(currentStatus) &&
+          !PAID_STATUS_IDS.has(previousStatus)
+        ) {
+          const paymentType = getPaymentTypeByStatus(currentStatus);
+          const externalId = orderExternalMap.get(order.Id);
+          if (paymentType && externalId) {
+            await notifyPaidStatus(userId, externalId, paymentType, order.Id);
           }
         }
       }
@@ -504,7 +962,10 @@ async function showRoutes(ctx, date) {
     if (!response?.TL_Mobile_EnumRoutesResponse?.Routes) {
       return await ctx.reply(
         `📭 Маршруты на ${date} не найдены`,
-        keyboards.getMainKeyboard(monitoring.isMonitoringActive(ctx.from.id)),
+        getMainKeyboardForSession(
+          session,
+          monitoring.isMonitoringActive(ctx.from.id),
+        ),
       );
     }
 
@@ -519,7 +980,10 @@ async function showRoutes(ctx, date) {
     if (totalOrders === 0) {
       return await ctx.reply(
         `📭 На ${date} заказов нет`,
-        keyboards.getMainKeyboard(monitoring.isMonitoringActive(ctx.from.id)),
+        getMainKeyboardForSession(
+          session,
+          monitoring.isMonitoringActive(ctx.from.id),
+        ),
       );
     }
 
@@ -736,7 +1200,10 @@ async function showActiveRoutes(ctx, date) {
     if (!response?.TL_Mobile_EnumRoutesResponse?.Routes) {
       return await ctx.reply(
         `📭 Активных маршрутов на ${date} не найдено`,
-        keyboards.getMainKeyboard(monitoring.isMonitoringActive(ctx.from.id)),
+        getMainKeyboardForSession(
+          session,
+          monitoring.isMonitoringActive(ctx.from.id),
+        ),
       );
     }
 
@@ -751,7 +1218,10 @@ async function showActiveRoutes(ctx, date) {
     if (totalOrders === 0) {
       return await ctx.reply(
         `📭 На ${date} активных заказов нет`,
-        keyboards.getMainKeyboard(monitoring.isMonitoringActive(ctx.from.id)),
+        getMainKeyboardForSession(
+          session,
+          monitoring.isMonitoringActive(ctx.from.id),
+        ),
       );
     }
 
@@ -937,7 +1407,10 @@ async function showActiveRoutes(ctx, date) {
     if (!activeRoutesFound) {
       await ctx.reply(
         `📭 На ${date} нет активных заказов`,
-        keyboards.getMainKeyboard(monitoring.isMonitoringActive(ctx.from.id)),
+        getMainKeyboardForSession(
+          session,
+          monitoring.isMonitoringActive(ctx.from.id),
+        ),
       );
     }
   } catch (error) {
@@ -1003,7 +1476,10 @@ async function showStatistics(ctx, date) {
     if (!response?.TL_Mobile_EnumRoutesResponse?.Routes) {
       return await ctx.reply(
         `📭 Маршруты на ${date} не найдены`,
-        keyboards.getMainKeyboard(monitoring.isMonitoringActive(ctx.from.id)),
+        getMainKeyboardForSession(
+          session,
+          monitoring.isMonitoringActive(ctx.from.id),
+        ),
       );
     }
 
@@ -1123,7 +1599,10 @@ async function showStatistics(ctx, date) {
 
     await ctx.reply(
       statsMessage,
-      keyboards.getMainKeyboard(monitoring.isMonitoringActive(ctx.from.id)),
+      getMainKeyboardForSession(
+        session,
+        monitoring.isMonitoringActive(ctx.from.id),
+      ),
     );
 
     // Отправляем детальную информацию по заказам
@@ -1239,7 +1718,7 @@ bot.command("start", async (ctx) => {
   if (session?.session_id) {
     await ctx.reply(
       "Выберите действие:",
-      keyboards.getMainKeyboard(isMonitoringActive),
+      getMainKeyboardForSession(session, isMonitoringActive),
     );
   } else {
     await ctx.reply(
@@ -1277,7 +1756,14 @@ bot.command("status", async (ctx) => {
     `Водитель: ${session.driver_name || "Не указан"}\n` +
     `Мониторинг: ${isMonitoringActive ? "✅ Активен" : "❌ Не активен"}`;
 
-  await ctx.reply(statusMessage, keyboards.getMainKeyboard(isMonitoringActive));
+  await ctx.reply(
+    statusMessage,
+    getMainKeyboardForSession(session, isMonitoringActive),
+  );
+});
+
+bot.command("tg", async (ctx) => {
+  await startQrLoginFlow(ctx);
 });
 
 bot.command(["broadcast", "br"], async (ctx) => {
@@ -1371,7 +1857,10 @@ bot.action("routes_select_date", async (ctx) => {
 
     await ctx.reply(
       "Введите дату в формате ДД.ММ.ГГГГ (например, 09.02.2024):",
-      keyboards.getMainKeyboard(monitoring.isMonitoringActive(ctx.from.id)),
+      getMainKeyboardForSession(
+        session,
+        monitoring.isMonitoringActive(ctx.from.id),
+      ),
     );
 
     await db.saveSession(ctx.from.id, {
@@ -1397,7 +1886,10 @@ bot.action("stats_select_date", async (ctx) => {
 
     await ctx.reply(
       "Введите дату в формате ДД.ММ.ГГГГ (например, 09.02.2024):",
-      keyboards.getMainKeyboard(monitoring.isMonitoringActive(ctx.from.id)),
+      getMainKeyboardForSession(
+        session,
+        monitoring.isMonitoringActive(ctx.from.id),
+      ),
     );
 
     await db.saveSession(ctx.from.id, {
@@ -1427,7 +1919,10 @@ bot.action("routes_select_date", async (ctx) => {
 
   await ctx.reply(
     "Введите дату в формате ДД.ММ.ГГГГ (например, 09.02.2024):",
-    keyboards.getMainKeyboard(monitoring.isMonitoringActive(ctx.from.id)),
+    getMainKeyboardForSession(
+      session,
+      monitoring.isMonitoringActive(ctx.from.id),
+    ),
   );
 
   await db.saveSession(ctx.from.id, {
@@ -1449,7 +1944,10 @@ bot.action("stats_select_date", async (ctx) => {
 
   await ctx.reply(
     "Введите дату в формате ДД.ММ.ГГГГ (например, 09.02.2024):",
-    keyboards.getMainKeyboard(monitoring.isMonitoringActive(ctx.from.id)),
+    getMainKeyboardForSession(
+      session,
+      monitoring.isMonitoringActive(ctx.from.id),
+    ),
   );
 
   await db.saveSession(ctx.from.id, {
@@ -1514,16 +2012,33 @@ bot.on("text", async (ctx) => {
         return await ctx.reply("Вы не авторизованы");
       }
 
+      const hasTgSession = hasTelegramSession(statusSession);
+      const orderChannel = getOrderChannelState(statusSession);
+      const reportChannel = getReportChannelState(statusSession);
+
       const statusMessage =
         `Статус: авторизован\n` +
         `Клиент: ${statusSession.client_code}\n` +
         `Логин: ${statusSession.login}\n` +
         `Водитель: ${statusSession.driver_name || "Не указан"}\n` +
-        `Мониторинг: ${statusMonitoringActive ? "✅ Активен" : "❌ Не активен"}`;
+        `Мониторинг: ${statusMonitoringActive ? "✅ Активен" : "❌ Не активен"}\n` +
+        `Telegram: ${hasTgSession ? "✅ Подключен" : "❌ Не подключен"}` +
+        (orderChannel.title
+          ? `\nКанал заказов: ${orderChannel.title} ${orderChannel.enabled ? "✅" : "🚫"}`
+          : "\nКанал заказов: не выбран") +
+        (reportChannel.title
+          ? `\nКанал отчета: ${reportChannel.title} ${reportChannel.enabled ? "✅" : "🚫"}`
+          : "\nКанал отчета: не выбран");
 
       await ctx.reply(
         statusMessage,
-        keyboards.getMainKeyboard(statusMonitoringActive),
+        keyboards.getProfileKeyboard({
+          hasTelegramSession: hasTgSession,
+          orderChannelConfigured: isOrderChannelConfigured(statusSession),
+          orderChannelEnabled: isOrderChannelEnabled(statusSession),
+          reportChannelConfigured: isReportChannelConfigured(statusSession),
+          reportChannelEnabled: isReportChannelEnabled(statusSession),
+        }),
       );
       return;
 
@@ -1537,7 +2052,7 @@ bot.on("text", async (ctx) => {
       if (isMonitoringActive) {
         return await ctx.reply(
           "⚠️ Мониторинг уже активен!",
-          keyboards.getMainKeyboard(true),
+          getMainKeyboardForSession(session, true),
         );
       }
       const started = monitoring.startMonitoring(
@@ -1549,7 +2064,7 @@ bot.on("text", async (ctx) => {
       if (started) {
         await ctx.reply(
           "✅ Мониторинг новых заказов включен",
-          keyboards.getMainKeyboard(true),
+          getMainKeyboardForSession(session, true),
         );
         void checkNewOrders(userId, session.session_id);
       }
@@ -1559,12 +2074,12 @@ bot.on("text", async (ctx) => {
       if (monitoring.stopMonitoring(userId)) {
         await ctx.reply(
           "✅ Мониторинг отключен",
-          keyboards.getMainKeyboard(false),
+          getMainKeyboardForSession(session, false),
         );
       } else {
         await ctx.reply(
           "⚠️ Мониторинг не был активен",
-          keyboards.getMainKeyboard(false),
+          getMainKeyboardForSession(session, false),
         );
       }
       return;
@@ -1575,6 +2090,9 @@ bot.on("text", async (ctx) => {
           "Вы не авторизованы",
           keyboards.getLoginKeyboard,
         );
+      }
+      if (!isReportChannelEnabled(session)) {
+        return await ctx.reply("Отчет отключен в профиле.");
       }
       await ctx.reply(
         'Выберите время работы или введите вручную в формате "9.30-21.00":',
@@ -1620,6 +2138,102 @@ bot.on("text", async (ctx) => {
   }
 
   // Обработка ввода даты
+  if (session?.step === config.STEPS.TG_PHONE) {
+    const phone = text.trim();
+    if (!/^\+?\d{10,15}$/.test(phone)) {
+      await ctx.reply("❌ Неверный формат номера. Пример: +79991234567");
+      return;
+    }
+
+    try {
+      const startResult = await tgClient.startTelegramLogin(userId, phone, {
+        notifyPassword: async () => {
+          await sendTelegramMessage(
+            userId,
+            "🔐 Введите пароль 2FA для Telegram:",
+          );
+          const currentSession = await db.getSession(userId);
+          await db.saveSession(userId, {
+            ...currentSession,
+            step: config.STEPS.TG_PASSWORD,
+          });
+        },
+        notifySuccess: async () => {
+          await sendTelegramMessage(
+            userId,
+            "✅ Telegram подключен. Теперь выберите канал в профиле.",
+          );
+          const currentSession = await db.getSession(userId);
+          await db.saveSession(userId, {
+            ...currentSession,
+            step: config.STEPS.AUTHENTICATED,
+          });
+        },
+        notifyError: async () => {
+          await sendTelegramMessage(
+            userId,
+            "❌ Не удалось подключить Telegram. Попробуйте снова через /tg.",
+          );
+          const currentSession = await db.getSession(userId);
+          await db.saveSession(userId, {
+            ...currentSession,
+            step: config.STEPS.AUTHENTICATED,
+          });
+        },
+      });
+
+      if (!startResult.started) {
+        await ctx.reply("⚠️ Подключение уже выполняется. Введите код из Telegram.");
+        return;
+      }
+
+      await ctx.reply("📨 Код отправлен. Введите код из Telegram:");
+      await db.saveSession(userId, {
+        ...session,
+        step: config.STEPS.TG_CODE,
+      });
+    } catch (error) {
+      console.error("Telegram login start error:", error);
+      await ctx.reply(
+        "❌ Не удалось начать вход. Проверьте настройки TG_API_ID/TG_API_HASH.",
+      );
+    }
+    return;
+  }
+
+  if (session?.step === config.STEPS.TG_CODE) {
+    const result = await tgClient.submitTelegramCode(userId, text.trim());
+    if (!result.success) {
+      await ctx.reply("⚠️ Вход в Telegram не запущен. Используйте /tg.");
+      return;
+    }
+    await ctx.reply("⏳ Проверяю код...");
+    return;
+  }
+
+  if (session?.step === config.STEPS.TG_PASSWORD) {
+    const result = await tgClient.submitTelegramPassword(userId, text.trim());
+    if (!result.success) {
+      await ctx.reply("⚠️ Вход в Telegram не запущен. Используйте /tg.");
+      return;
+    }
+    await ctx.reply("⏳ Проверяю пароль...");
+    return;
+  }
+
+  if (session?.step === config.STEPS.AWAITING_PAYMENT_CHANGE) {
+    const paymentType = normalizePaymentType(text);
+    if (!paymentType) {
+      await ctx.reply(
+        "❌ Не понял способ оплаты. Введите: наличные / терминал / сайт",
+      );
+      return;
+    }
+
+    await handlePaymentTypeSelection(ctx, paymentType);
+    return;
+  }
+
   if (session?.step === config.STEPS.AWAITING_DATE) {
     if (/^\d{2}\.\d{2}\.\d{4}$/.test(text)) {
       await showRoutes(ctx, text);
@@ -1632,7 +2246,7 @@ bot.on("text", async (ctx) => {
     } else {
       await ctx.reply(
         "❌ Неверный формат даты. Используйте формат ДД.ММ.ГГГГ",
-        keyboards.getMainKeyboard(isMonitoringActive),
+        getMainKeyboardForSession(session, isMonitoringActive),
       );
     }
     return;
@@ -1650,7 +2264,7 @@ bot.on("text", async (ctx) => {
     } else {
       await ctx.reply(
         "❌ Неверный формат даты. Используйте формат ДД.ММ.ГГГГ",
-        keyboards.getMainKeyboard(isMonitoringActive),
+        getMainKeyboardForSession(session, isMonitoringActive),
       );
     }
     return;
@@ -1658,6 +2272,14 @@ bot.on("text", async (ctx) => {
 
   // Обработка ввода времени для отчета
   if (session?.step === config.STEPS.AWAITING_WORK_TIME) {
+    if (!isReportChannelEnabled(session)) {
+      await ctx.reply("Отчет отключен в профиле.");
+      await db.saveSession(userId, {
+        ...session,
+        step: config.STEPS.AUTHENTICATED,
+      });
+      return;
+    }
     const timeRegex = /^\d{1,2}\.\d{2}-\d{1,2}\.\d{2}$/;
     if (!timeRegex.test(text)) {
       return await ctx.reply(
@@ -1677,8 +2299,10 @@ bot.on("text", async (ctx) => {
 
       await ctx.reply(
         reportMessage,
-        keyboards.getMainKeyboard(monitoring.isMonitoringActive(userId)),
+        getMainKeyboardForSession(session, monitoring.isMonitoringActive(userId)),
       );
+
+      await sendReportToChannel(userId, session, reportMessage);
 
       await db.saveSession(userId, {
         ...session,
@@ -1736,7 +2360,7 @@ bot.on("text", async (ctx) => {
             });
             await ctx.reply(
               "✅ Авторизация успешна!",
-              keyboards.getMainKeyboard(false),
+              getMainKeyboardForSession(session, false),
             );
           }
         } catch (error) {
@@ -1762,6 +2386,12 @@ bot.action("report_time_8_30_21", async (ctx) => {
     if (!session?.session_id) {
       return await ctx.reply("Вы не авторизованы", keyboards.getLoginKeyboard);
     }
+    if (!isReportChannelEnabled(session)) {
+      return await ctx.reply("Отчет отключен в профиле.");
+    }
+    if (!isReportChannelEnabled(session)) {
+      return await ctx.reply("Отчет отключен в профиле.");
+    }
 
     const timeText = "8.30-21.00";
     const currentDate = new Date().toLocaleDateString("ru-RU");
@@ -1775,8 +2405,10 @@ bot.action("report_time_8_30_21", async (ctx) => {
 
     await ctx.reply(
       reportMessage,
-      keyboards.getMainKeyboard(monitoring.isMonitoringActive(userId)),
+      getMainKeyboardForSession(session, monitoring.isMonitoringActive(userId)),
     );
+
+    await sendReportToChannel(userId, session, reportMessage);
 
     await db.saveSession(userId, {
       ...session,
@@ -1792,6 +2424,9 @@ bot.action("report_time_9_21", async (ctx) => {
     if (!session?.session_id) {
       return await ctx.reply("Вы не авторизованы", keyboards.getLoginKeyboard);
     }
+    if (!isReportChannelEnabled(session)) {
+      return await ctx.reply("Отчет отключен в профиле.");
+    }
 
     const timeText = "9.00-21.00";
     const currentDate = new Date().toLocaleDateString("ru-RU");
@@ -1805,8 +2440,10 @@ bot.action("report_time_9_21", async (ctx) => {
 
     await ctx.reply(
       reportMessage,
-      keyboards.getMainKeyboard(monitoring.isMonitoringActive(userId)),
+      getMainKeyboardForSession(session, monitoring.isMonitoringActive(userId)),
     );
+
+    await sendReportToChannel(userId, session, reportMessage);
 
     await db.saveSession(userId, {
       ...session,
@@ -1825,6 +2462,247 @@ bot.action("report_custom_time", async (ctx) => {
 
     await ctx.reply('Введите время работы в формате "9.30-21.00":');
     // Session step already set to AWAITING_WORK_TIME in the main handler
+  });
+});
+
+// Telegram userbot настройки
+bot.action("tg_login", async (ctx) => {
+  await safeCallback(ctx, async (ctx) => {
+    await startQrLoginFlow(ctx);
+  });
+});
+
+bot.action("tg_select_order_channel", async (ctx) => {
+  await safeCallback(ctx, async (ctx) => {
+    await startChannelSelection(ctx, "order");
+  });
+});
+
+bot.action("tg_select_report_channel", async (ctx) => {
+  await safeCallback(ctx, async (ctx) => {
+    await startChannelSelection(ctx, "report");
+  });
+});
+
+bot.action("tg_toggle_order_channel", async (ctx) => {
+  await safeCallback(ctx, async (ctx) => {
+    const userId = ctx.from.id;
+    const session = await db.getSession(userId);
+    if (!session?.session_id) {
+      return await ctx.reply("Вы не авторизованы", keyboards.getLoginKeyboard);
+    }
+    if (!isOrderChannelConfigured(session)) {
+      return await ctx.reply("Канал заказов не выбран.");
+    }
+    const nextValue = isOrderChannelEnabled(session) ? 0 : 1;
+    await db.saveSession(userId, {
+      ...session,
+      tg_order_channel_enabled: nextValue,
+    });
+    await ctx.reply(
+      nextValue ? "✅ Канал заказов включен" : "🚫 Канал заказов отключен",
+    );
+  });
+});
+
+bot.action("tg_toggle_report_channel", async (ctx) => {
+  await safeCallback(ctx, async (ctx) => {
+    const userId = ctx.from.id;
+    const session = await db.getSession(userId);
+    if (!session?.session_id) {
+      return await ctx.reply("Вы не авторизованы", keyboards.getLoginKeyboard);
+    }
+    if (!isReportChannelConfigured(session)) {
+      return await ctx.reply("Канал отчета не выбран.");
+    }
+    const nextValue = isReportChannelEnabled(session) ? 0 : 1;
+    await db.saveSession(userId, {
+      ...session,
+      tg_report_channel_enabled: nextValue,
+    });
+    await ctx.reply(
+      nextValue ? "✅ Канал отчета включен" : "🚫 Канал отчета отключен",
+    );
+  });
+});
+
+bot.action("tg_logout", async (ctx) => {
+  await safeCallback(ctx, async (ctx) => {
+    const userId = ctx.from.id;
+    const session = await db.getSession(userId);
+    if (!session?.session_id) {
+      return await ctx.reply("Вы не авторизованы", keyboards.getLoginKeyboard);
+    }
+    await tgClient.logoutTelegram(userId);
+    await ctx.reply("✅ Telegram отключен.");
+  });
+});
+
+bot.action("tg_refresh_qr", async (ctx) => {
+  await safeCallback(ctx, async (ctx) => {
+    const userId = ctx.from.id;
+    if (tgClient.isTelegramLoginInProgress(userId)) {
+      await tgClient.cancelTelegramLogin(userId);
+    }
+    await clearQrMessage(userId);
+    await startQrLoginFlow(ctx);
+  });
+});
+
+bot.action("tg_cancel_login", async (ctx) => {
+  await safeCallback(ctx, async (ctx) => {
+    const userId = ctx.from.id;
+    const canceled = await tgClient.cancelTelegramLogin(userId);
+    await clearQrMessage(userId);
+    if (canceled) {
+      const session = await db.getSession(userId);
+      if (session) {
+        await db.saveSession(userId, {
+          ...session,
+          step: config.STEPS.AUTHENTICATED,
+        });
+      }
+      await ctx.reply("❌ Вход в Telegram отменен.");
+      return;
+    }
+    await ctx.reply("Нет активного входа в Telegram.");
+  });
+});
+
+bot.action(/^tg_channel_page_(\d+)$/, async (ctx) => {
+  await safeCallback(ctx, async (ctx) => {
+    const userId = ctx.from.id;
+    const page = Number(ctx.match[1]);
+    const listState = tgChannelLists.get(userId);
+    if (!listState?.channels) {
+      return await ctx.reply("Список каналов устарел. Откройте профиль заново.");
+    }
+    const pageSize = 8;
+    const start = page * pageSize;
+    const pageChannels = listState.channels.slice(start, start + pageSize);
+    const keyboard = keyboards.getChannelSelectionKeyboard(
+      pageChannels,
+      page,
+      listState.channels.length,
+      pageSize,
+    );
+    await ctx.editMessageText("Выберите канал:", keyboard);
+  });
+});
+
+bot.action(/^tg_channel_select_(-?\d+)$/, async (ctx) => {
+  await safeCallback(ctx, async (ctx) => {
+    const userId = ctx.from.id;
+    const channelId = ctx.match[1];
+    const listState = tgChannelLists.get(userId);
+    if (!listState?.channels) {
+      return await ctx.reply("Список каналов устарел. Откройте профиль заново.");
+    }
+    const channel = listState.channels.find((item) => item.id === channelId);
+    if (!channel) {
+      return await ctx.reply("Канал не найден. Попробуйте заново.");
+    }
+
+    const session = await db.getSession(userId);
+    if (listState.mode === "report") {
+      await db.saveSession(userId, {
+        ...session,
+        tg_report_channel_id: channel.id,
+        tg_report_channel_access_hash: channel.accessHash,
+        tg_report_channel_title: channel.title,
+        tg_report_channel_enabled: 1,
+      });
+    } else {
+      await db.saveSession(userId, {
+        ...session,
+        tg_order_channel_id: channel.id,
+        tg_order_channel_access_hash: channel.accessHash,
+        tg_order_channel_title: channel.title,
+        tg_order_channel_enabled: 1,
+      });
+    }
+
+    await ctx.editMessageText(`✅ Канал выбран: ${channel.title}`);
+  });
+});
+
+bot.action(/^payment_send_(.+)$/, async (ctx) => {
+  await safeCallback(ctx, async (ctx) => {
+    const userId = ctx.from.id;
+    const orderId = ctx.match[1];
+    const key = getPaymentActionKey(userId, orderId);
+    const pending = pendingPaymentActions.get(key);
+    if (!pending) {
+      return await ctx.reply("⏱️ Это уведомление уже обработано.");
+    }
+
+    clearPendingPaymentAction(userId, orderId);
+    const session = await db.getSession(userId);
+    if (!isOrderChannelEnabled(session)) {
+      return await ctx.reply("Канал не настроен. Откройте профиль.");
+    }
+
+    try {
+      const channel = getOrderChannelState(session);
+      await tgClient.sendChannelMessage(
+        userId,
+        channel.id,
+        channel.accessHash,
+        buildPaymentMessage(pending.externalId, pending.paymentType),
+      );
+      await ctx.reply("✅ Отправлено в канал");
+    } catch (error) {
+      console.error("Failed to send payment to channel:", error);
+      await ctx.reply("❌ Не удалось отправить в канал");
+    }
+  });
+});
+
+bot.action(/^payment_change_(.+)$/, async (ctx) => {
+  await safeCallback(ctx, async (ctx) => {
+    const userId = ctx.from.id;
+    const orderId = ctx.match[1];
+    const key = getPaymentActionKey(userId, orderId);
+    const pending = pendingPaymentActions.get(key);
+    if (!pending) {
+      return await ctx.reply("⏱️ Это уведомление уже обработано.");
+    }
+
+    clearPendingPaymentAction(userId, orderId);
+    pendingPaymentChange.set(userId, {
+      orderId,
+      externalId: pending.externalId,
+      oldPaymentType: pending.paymentType,
+    });
+
+    const session = await db.getSession(userId);
+    await db.saveSession(userId, {
+      ...session,
+      step: config.STEPS.AWAITING_PAYMENT_CHANGE,
+    });
+
+    await ctx.reply(
+      "Выберите новый способ оплаты:",
+      keyboards.getPaymentTypeKeyboard(orderId),
+    );
+  });
+});
+
+bot.action(/^payment_type_cash_(.+)$/, async (ctx) => {
+  await safeCallback(ctx, async (ctx) => {
+    await handlePaymentTypeSelection(ctx, "наличные");
+  });
+});
+
+bot.action(/^payment_type_terminal_(.+)$/, async (ctx) => {
+  await safeCallback(ctx, async (ctx) => {
+    await handlePaymentTypeSelection(ctx, "терминал");
+  });
+});
+
+bot.action(/^payment_type_site_(.+)$/, async (ctx) => {
+  await safeCallback(ctx, async (ctx) => {
+    await handlePaymentTypeSelection(ctx, "сайт");
   });
 });
 
@@ -1893,7 +2771,10 @@ bot.action("monthly_stats_current", async (ctx) => {
         await sendTelegramMessage(
           chatId,
           message,
-          keyboards.getMainKeyboard(monitoring.isMonitoringActive(userId)),
+          getMainKeyboardForSession(
+            session,
+            monitoring.isMonitoringActive(userId),
+          ),
         );
       } catch (error) {
         console.error("Error getting monthly statistics:", error);
@@ -1901,7 +2782,10 @@ bot.action("monthly_stats_current", async (ctx) => {
           await sendTelegramMessage(
             chatId,
             "❌ Ошибка при сборе статистики",
-            keyboards.getMainKeyboard(monitoring.isMonitoringActive(userId)),
+            getMainKeyboardForSession(
+              session,
+              monitoring.isMonitoringActive(userId),
+            ),
           );
         } catch (sendError) {
           console.error(
@@ -1979,7 +2863,10 @@ bot.action("monthly_stats_previous", async (ctx) => {
         await sendTelegramMessage(
           chatId,
           message,
-          keyboards.getMainKeyboard(monitoring.isMonitoringActive(userId)),
+          getMainKeyboardForSession(
+            session,
+            monitoring.isMonitoringActive(userId),
+          ),
         );
       } catch (error) {
         console.error("Error getting monthly statistics:", error);
@@ -1987,7 +2874,10 @@ bot.action("monthly_stats_previous", async (ctx) => {
           await sendTelegramMessage(
             chatId,
             "❌ Ошибка при сборе статистики",
-            keyboards.getMainKeyboard(monitoring.isMonitoringActive(userId)),
+            getMainKeyboardForSession(
+              session,
+              monitoring.isMonitoringActive(userId),
+            ),
           );
         } catch (sendError) {
           console.error(
@@ -2105,7 +2995,10 @@ bot.action(/^month_select_(\d+)_(\d+)$/, async (ctx) => {
         await sendTelegramMessage(
           chatId,
           message,
-          keyboards.getMainKeyboard(monitoring.isMonitoringActive(userId)),
+          getMainKeyboardForSession(
+            session,
+            monitoring.isMonitoringActive(userId),
+          ),
         );
       } catch (error) {
         console.error("Error getting monthly statistics:", error);
@@ -2113,7 +3006,10 @@ bot.action(/^month_select_(\d+)_(\d+)$/, async (ctx) => {
           await sendTelegramMessage(
             chatId,
             "❌ Ошибка при сборе статистики",
-            keyboards.getMainKeyboard(monitoring.isMonitoringActive(userId)),
+            getMainKeyboardForSession(
+              session,
+              monitoring.isMonitoringActive(userId),
+            ),
           );
         } catch (sendError) {
           console.error(
@@ -2142,6 +3038,8 @@ async function startBot() {
     console.log("🚀 Запуск бота...");
     await bot.launch();
     console.log("✅ Бот успешно запущен");
+
+    startShiftReportScheduler();
     
     // Автоматический перезапуск при ошибках соединения
     bot.catch(async (error) => {

@@ -25,8 +25,41 @@ class Database {
                 password TEXT,
                 session_id TEXT,
                 driver_name TEXT,
-                step TEXT
+                step TEXT,
+                tg_session TEXT,
+                tg_order_channel_id TEXT,
+                tg_order_channel_access_hash TEXT,
+                tg_order_channel_title TEXT,
+                tg_order_channel_enabled INTEGER DEFAULT 0,
+                tg_report_channel_id TEXT,
+                tg_report_channel_access_hash TEXT,
+                tg_report_channel_title TEXT,
+                tg_report_channel_enabled INTEGER DEFAULT 0
             )`);
+
+      // Добавляем недостающие колонки (для старых баз)
+      this.db.all("PRAGMA table_info(sessions)", (err, rows) => {
+        if (err) {
+          console.error("Error reading sessions table info:", err);
+          return;
+        }
+        const columns = new Set(rows.map((row) => row.name));
+        const addColumnIfMissing = (name, type) => {
+          if (!columns.has(name)) {
+            this.db.run(`ALTER TABLE sessions ADD COLUMN ${name} ${type}`);
+          }
+        };
+
+        addColumnIfMissing("tg_session", "TEXT");
+        addColumnIfMissing("tg_order_channel_id", "TEXT");
+        addColumnIfMissing("tg_order_channel_access_hash", "TEXT");
+        addColumnIfMissing("tg_order_channel_title", "TEXT");
+        addColumnIfMissing("tg_order_channel_enabled", "INTEGER DEFAULT 0");
+        addColumnIfMissing("tg_report_channel_id", "TEXT");
+        addColumnIfMissing("tg_report_channel_access_hash", "TEXT");
+        addColumnIfMissing("tg_report_channel_title", "TEXT");
+        addColumnIfMissing("tg_report_channel_enabled", "INTEGER DEFAULT 0");
+      });
 
       // Таблица истории смен
       this.db.run(`CREATE TABLE IF NOT EXISTS shift_history (
@@ -44,6 +77,15 @@ class Database {
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(user_id, shift_date)
             )`);
+
+      // Таблица статусов заказов для отслеживания изменений оплаты
+      this.db.run(`CREATE TABLE IF NOT EXISTS order_statuses (
+                user_id INTEGER NOT NULL,
+                order_id TEXT NOT NULL,
+                status_id TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, order_id)
+            )`);
     });
   }
 
@@ -55,20 +97,63 @@ class Database {
    */
   async saveSession(userId, sessionData) {
     return new Promise((resolve, reject) => {
-      this.sessionCache.set(userId, sessionData);
+      const cached = this.sessionCache.get(userId) || {};
+      const resolvedSession = {
+        ...cached,
+        ...sessionData,
+      };
+
+      const resolveField = (field) =>
+        sessionData[field] === undefined ? cached[field] : sessionData[field];
+
+      resolvedSession.tg_session = resolveField("tg_session");
+      resolvedSession.tg_order_channel_id = resolveField("tg_order_channel_id");
+      resolvedSession.tg_order_channel_access_hash = resolveField(
+        "tg_order_channel_access_hash",
+      );
+      resolvedSession.tg_order_channel_title = resolveField(
+        "tg_order_channel_title",
+      );
+      resolvedSession.tg_order_channel_enabled = resolveField(
+        "tg_order_channel_enabled",
+      );
+      resolvedSession.tg_report_channel_id = resolveField("tg_report_channel_id");
+      resolvedSession.tg_report_channel_access_hash = resolveField(
+        "tg_report_channel_access_hash",
+      );
+      resolvedSession.tg_report_channel_title = resolveField(
+        "tg_report_channel_title",
+      );
+      resolvedSession.tg_report_channel_enabled = resolveField(
+        "tg_report_channel_enabled",
+      );
+
+      this.sessionCache.set(userId, resolvedSession);
 
       const query = `INSERT OR REPLACE INTO sessions
-                (user_id, client_code, login, password, session_id, driver_name, step)
-                VALUES (?, ?, ?, ?, ?, ?, ?)`;
+                (user_id, client_code, login, password, session_id, driver_name, step,
+                tg_session,
+                tg_order_channel_id, tg_order_channel_access_hash, tg_order_channel_title, tg_order_channel_enabled,
+                tg_report_channel_id, tg_report_channel_access_hash, tg_report_channel_title, tg_report_channel_enabled)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
 
       const params = [
         userId,
-        sessionData.client_code,
-        sessionData.login,
-        sessionData.password,
-        sessionData.session_id,
-        sessionData.driver_name,
-        sessionData.step,
+        resolvedSession.client_code,
+        resolvedSession.login,
+        resolvedSession.password,
+        resolvedSession.session_id,
+        resolvedSession.driver_name,
+        resolvedSession.step,
+        resolvedSession.tg_session,
+        resolvedSession.tg_order_channel_id,
+        resolvedSession.tg_order_channel_access_hash,
+        resolvedSession.tg_order_channel_title,
+        resolvedSession.tg_order_channel_enabled || 0,
+        resolvedSession.tg_report_channel_id,
+        resolvedSession.tg_report_channel_access_hash,
+        resolvedSession.tg_report_channel_title,
+        resolvedSession.tg_report_channel_enabled || 0,
       ];
 
       this.db.run(query, params, (err) => {
@@ -126,6 +211,44 @@ class Database {
     this.sessionCache.delete(userId);
     return new Promise((resolve, reject) => {
       this.db.run("DELETE FROM sessions WHERE user_id = ?", [userId], (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+  }
+
+  /**
+   * Получает последний статус заказа
+   * @param {number} userId - ID пользователя
+   * @param {string} orderId - ID заказа
+   * @returns {Promise<string|null>}
+   */
+  async getOrderStatus(userId, orderId) {
+    return new Promise((resolve, reject) => {
+      this.db.get(
+        "SELECT status_id FROM order_statuses WHERE user_id = ? AND order_id = ?",
+        [userId, orderId],
+        (err, row) => {
+          if (err) reject(err);
+          else resolve(row?.status_id || null);
+        },
+      );
+    });
+  }
+
+  /**
+   * Сохраняет статус заказа
+   * @param {number} userId - ID пользователя
+   * @param {string} orderId - ID заказа
+   * @param {string} statusId - ID статуса
+   * @returns {Promise<void>}
+   */
+  async saveOrderStatus(userId, orderId, statusId) {
+    return new Promise((resolve, reject) => {
+      const query = `INSERT OR REPLACE INTO order_statuses
+        (user_id, order_id, status_id, updated_at)
+        VALUES (?, ?, ?, CURRENT_TIMESTAMP)`;
+      this.db.run(query, [userId, orderId, statusId], (err) => {
         if (err) reject(err);
         else resolve();
       });
