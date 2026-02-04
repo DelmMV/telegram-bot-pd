@@ -30,23 +30,23 @@ const safeCallback = async (ctx, handler, timeoutMs = 85000) => {
   const timeoutPromise = new Promise((_, reject) => {
     setTimeout(() => reject(new Error('Callback timeout')), timeoutMs);
   });
-  
+
   try {
     await Promise.race([handler(ctx), timeoutPromise]);
-    await ctx.answerCbQuery().catch(() => {}); // Всегда отвечаем на callback
+    await ctx.answerCbQuery().catch(() => { }); // Всегда отвечаем на callback
   } catch (error) {
     console.error(`Callback error (${ctx.callbackQuery?.data}):`, error);
-    
+
     // Пытаемся ответить на callback, чтобы избежать "постоянных загрузок"
-    await ctx.answerCbQuery('❌ Ошибка обработки').catch(() => {});
-    
+    await ctx.answerCbQuery('❌ Ошибка обработки').catch(() => { });
+
     // Уведомляем пользователя
     try {
       await ctx.reply('⚠️ Произошла ошибка при обработке запроса. Попробуйте позже.');
     } catch (replyError) {
       console.error('Failed to send error message:', replyError);
     }
-    
+
     // Логируем для админа (если есть)
     const adminUserIds = new Set(config.ADMIN_USER_IDS);
     if (adminUserIds.size > 0 && !adminUserIds.has(ctx.from?.id)) {
@@ -305,7 +305,7 @@ const getPaymentActionKey = (userId, orderId) => `${userId}:${orderId}`;
 
 const getMainKeyboardForSession = (session, isMonitoringActive) =>
   keyboards.getMainKeyboard(isMonitoringActive, {
-    showReportButton: isReportChannelEnabled(session),
+    showReportButton: true,
   });
 
 const scheduleAutoSend = async (userId, orderId, externalId, paymentType) => {
@@ -659,7 +659,7 @@ async function checkNewOrders(userId, sessionId, allowReentry = false) {
     // Таймаут 45 секунд для проверки новых заказов
     const result = await Promise.race([
       api.getRoutes(activeSessionId, currentDate, credentials),
-      new Promise((_, reject) => 
+      new Promise((_, reject) =>
         setTimeout(() => reject(new Error('Проверка заказов заняла слишком много времени')), 45000)
       )
     ]);
@@ -947,7 +947,7 @@ async function showRoutes(ctx, date) {
     // Таймаут 60 секунд для получения маршрутов
     const result = await Promise.race([
       api.getRoutes(session.session_id, date, credentials),
-      new Promise((_, reject) => 
+      new Promise((_, reject) =>
         setTimeout(() => reject(new Error('Получение маршрутов заняло слишком много времени')), 60000)
       )
     ]);
@@ -990,7 +990,7 @@ async function showRoutes(ctx, date) {
     for (const route of routes) {
       const detailsResult = await Promise.race([
         api.getRouteDetails(session.session_id, [route.Id], credentials),
-        new Promise((_, reject) => 
+        new Promise((_, reject) =>
           setTimeout(() => reject(new Error('Получение деталей маршрута заняло слишком много времени')), 30000)
         )
       ]);
@@ -1009,7 +1009,7 @@ async function showRoutes(ctx, date) {
 
       const orderDetailsResult = await Promise.race([
         api.getOrderDetails(session.session_id, orderIds, credentials),
-        new Promise((_, reject) => 
+        new Promise((_, reject) =>
           setTimeout(() => reject(new Error('Получение деталей заказов заняло слишком много времени')), 30000)
         )
       ]);
@@ -1185,7 +1185,7 @@ async function showActiveRoutes(ctx, date) {
     // Таймаут 60 секунд для получения активных маршрутов
     const result = await Promise.race([
       api.getRoutes(session.session_id, date, credentials),
-      new Promise((_, reject) => 
+      new Promise((_, reject) =>
         setTimeout(() => reject(new Error('Получение активных маршрутов заняло слишком много времени')), 60000)
       )
     ]);
@@ -1237,7 +1237,7 @@ async function showActiveRoutes(ctx, date) {
     for (const route of routes) {
       const detailsResult = await Promise.race([
         api.getRouteDetails(session.session_id, [route.Id], credentials),
-        new Promise((_, reject) => 
+        new Promise((_, reject) =>
           setTimeout(() => reject(new Error('Получение деталей маршрута заняло слишком много времени')), 30000)
         )
       ]);
@@ -1255,7 +1255,7 @@ async function showActiveRoutes(ctx, date) {
 
       const orderDetailsResult = await Promise.race([
         api.getOrderDetails(session.session_id, orderIds, credentials),
-        new Promise((_, reject) => 
+        new Promise((_, reject) =>
           setTimeout(() => reject(new Error('Получение деталей заказов заняло слишком много времени')), 30000)
         )
       ]);
@@ -1461,7 +1461,7 @@ async function showStatistics(ctx, date) {
     // Таймаут 60 секунд для получения статистики
     const result = await Promise.race([
       api.getRoutes(session.session_id, date, credentials),
-      new Promise((_, reject) => 
+      new Promise((_, reject) =>
         setTimeout(() => reject(new Error('Получение статистики заняло слишком много времени')), 60000)
       )
     ]);
@@ -1499,7 +1499,7 @@ async function showStatistics(ctx, date) {
     for (const route of routes) {
       const detailsResult = await Promise.race([
         api.getRouteDetails(session.session_id, [route.Id], credentials),
-        new Promise((_, reject) => 
+        new Promise((_, reject) =>
           setTimeout(() => reject(new Error('Получение деталей маршрута заняло слишком много времени')), 30000)
         )
       ]);
@@ -1523,7 +1523,7 @@ async function showStatistics(ctx, date) {
 
       const orderDetailsResult = await Promise.race([
         api.getOrderDetails(session.session_id, orderIds, credentials),
-        new Promise((_, reject) => 
+        new Promise((_, reject) =>
           setTimeout(() => reject(new Error('Получение деталей заказов заняло слишком много времени')), 30000)
         )
       ]);
@@ -2092,7 +2092,9 @@ bot.on("text", async (ctx) => {
         );
       }
       if (!isReportChannelEnabled(session)) {
-        return await ctx.reply("Отчет отключен в профиле.");
+        return await ctx.reply(
+          "Отчет отключен. Пожалуйста, подключите Telegram и выберите канал для отчетов в Профиле.",
+        );
       }
       await ctx.reply(
         'Выберите время работы или введите вручную в формате "9.30-21.00":',
@@ -2725,7 +2727,7 @@ bot.action("monthly_stats_current", async (ctx) => {
     // Отправляем начальное сообщение и запускаем сбор статистики в фоне
     await ctx.reply(
       "⏳ Собираю статистику за текущий месяц...\nЭто может занять несколько минут.\n\n" +
-        "Вы можете продолжить работу с ботом, результат будет отправлен автоматически.",
+      "Вы можете продолжить работу с ботом, результат будет отправлен автоматически.",
     );
 
     // Запускаем асинхронную обработку без блокировки callback
@@ -2817,7 +2819,7 @@ bot.action("monthly_stats_previous", async (ctx) => {
     // Отправляем начальное сообщение и запускаем сбор статистики в фоне
     await ctx.reply(
       "⏳ Собираю статистику за прошлый месяц...\nЭто может занять несколько минут.\n\n" +
-        "Вы можете продолжить работу с ботом, результат будет отправлен автоматически.",
+      "Вы можете продолжить работу с ботом, результат будет отправлен автоматически.",
     );
 
     // Запускаем асинхронную обработку без блокировки callback
@@ -2949,7 +2951,7 @@ bot.action(/^month_select_(\d+)_(\d+)$/, async (ctx) => {
     // Отправляем начальное сообщение и запускаем сбор статистики в фоне
     await ctx.reply(
       `⏳ Собираю статистику за ${monthNames[month - 1]} ${year}...\nЭто может занять несколько минут.\n\n` +
-        "Вы можете продолжить работу с ботом, результат будет отправлен автоматически.",
+      "Вы можете продолжить работу с ботом, результат будет отправлен автоматически.",
     );
 
     // Запускаем асинхронную обработку без блокировки callback
@@ -3040,11 +3042,11 @@ async function startBot() {
     console.log("✅ Бот успешно запущен");
 
     startShiftReportScheduler();
-    
+
     // Автоматический перезапуск при ошибках соединения
     bot.catch(async (error) => {
       console.error("❌ Ошибка Telegraf:", error);
-      
+
       // Пытаемся уведомить админов
       const adminUserIds = new Set(config.ADMIN_USER_IDS);
       if (adminUserIds.size > 0) {
@@ -3059,7 +3061,7 @@ async function startBot() {
           }
         }
       }
-      
+
       // Если ошибка критическая - перезапускаем через 30 секунд
       if (error.message?.includes('network') || error.message?.includes('timeout')) {
         console.log("🔄 Перезапуск бота через 30 секунд...");
@@ -3069,10 +3071,10 @@ async function startBot() {
         }, 30000);
       }
     });
-    
+
   } catch (error) {
     console.error("❌ Критическая ошибка при запуске бота:", error);
-    
+
     // Пытаемся уведомить админов
     const adminUserIds = new Set(config.ADMIN_USER_IDS);
     if (adminUserIds.size > 0) {
@@ -3087,7 +3089,7 @@ async function startBot() {
         }
       }
     }
-    
+
     // Перезапуск через 60 секунд
     console.log("🔄 Перезапуск бота через 60 секунд...");
     setTimeout(() => {
@@ -3117,7 +3119,7 @@ process.once("SIGTERM", () => {
 process.on("uncaughtException", (error) => {
   console.error("❌ Uncaught Exception:", error);
   console.error("Stack:", error.stack);
-  
+
   // Пытаемся уведомить админов
   const adminUserIds = new Set(config.ADMIN_USER_IDS);
   if (adminUserIds.size > 0) {
@@ -3125,9 +3127,9 @@ process.on("uncaughtException", (error) => {
     sendTelegramMessage(
       adminId,
       `🚨 Uncaught Exception:\n${error.message}\n\n${error.stack?.substring(0, 500)}`
-    ).catch(() => {});
+    ).catch(() => { });
   }
-  
+
   // Не выходим сразу, даем шанс на восстановление
   setTimeout(() => {
     console.log("🔄 Попытка восстановления после uncaught exception...");
@@ -3138,7 +3140,7 @@ process.on("uncaughtException", (error) => {
 process.on("unhandledRejection", (reason, promise) => {
   console.error("❌ Unhandled Rejection at:", promise);
   console.error("Reason:", reason);
-  
+
   // Пытаемся уведомить админов
   const adminUserIds = new Set(config.ADMIN_USER_IDS);
   if (adminUserIds.size > 0) {
@@ -3147,7 +3149,7 @@ process.on("unhandledRejection", (reason, promise) => {
     sendTelegramMessage(
       adminId,
       `🚨 Unhandled Rejection:\n${reasonStr.substring(0, 500)}`
-    ).catch(() => {});
+    ).catch(() => { });
   }
 });
 

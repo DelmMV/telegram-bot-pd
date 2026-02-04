@@ -170,9 +170,23 @@ const createClient = async (sessionString, userId) => {
   return client;
 };
 
+const isFatalAuthError = (error) => {
+  const message = String(error?.message || "").toLowerCase();
+  return (
+    message.includes("invalid auth key") ||
+    message.includes("auth_key_unused") ||
+    message.includes("msg_key doesn't match") ||
+    message.includes("security error")
+  );
+};
+
 const isDisconnectedError = (error) => {
   const message = String(error?.message || "").toLowerCase();
-  return message.includes("timeout") || message.includes("not connected");
+  return (
+    message.includes("timeout") ||
+    message.includes("not connected") ||
+    message.includes("handshake failed")
+  );
 };
 
 const resetClient = async (userId) => {
@@ -194,12 +208,12 @@ const startKeepAlive = (userId, client) => {
       : minInterval;
   const backoffFactor =
     Number.isFinite(config.TELEGRAM_KEEPALIVE_BACKOFF_FACTOR) &&
-    config.TELEGRAM_KEEPALIVE_BACKOFF_FACTOR > 1
+      config.TELEGRAM_KEEPALIVE_BACKOFF_FACTOR > 1
       ? config.TELEGRAM_KEEPALIVE_BACKOFF_FACTOR
       : 1.5;
   const recoveryFactor =
     Number.isFinite(config.TELEGRAM_KEEPALIVE_RECOVERY_FACTOR) &&
-    config.TELEGRAM_KEEPALIVE_RECOVERY_FACTOR > 1
+      config.TELEGRAM_KEEPALIVE_RECOVERY_FACTOR > 1
       ? config.TELEGRAM_KEEPALIVE_RECOVERY_FACTOR
       : 1.2;
   const failureThreshold = Math.max(
@@ -243,6 +257,16 @@ const startKeepAlive = (userId, client) => {
       } catch (error) {
         state.failures += 1;
         state.successes = 0;
+
+        if (isFatalAuthError(error)) {
+          console.error(
+            `Fatal Telegram auth error for user ${userId} in keepalive:`,
+            error.message,
+          );
+          await logoutTelegram(userId);
+          return; // Stop keepalive
+        }
+
         state.intervalMs = Math.max(
           minInterval,
           Math.floor(state.intervalMs / backoffFactor),
@@ -319,6 +343,16 @@ const withTelegramClient = async (userId, actionName, actionFn) => {
   } catch (error) {
     const stats = getClientStats(userId);
     stats.consecutiveErrors += 1;
+
+    if (isFatalAuthError(error)) {
+      console.error(
+        `Fatal Telegram auth error for user ${userId} during ${actionName}:`,
+        error.message,
+      );
+      await logoutTelegram(userId);
+      throw error;
+    }
+
     if (stats.consecutiveErrors >= config.TELEGRAM_ERROR_ALERT_THRESHOLD) {
       console.warn(
         `Telegram errors for user ${userId}: ${stats.consecutiveErrors}`,
